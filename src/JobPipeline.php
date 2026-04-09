@@ -7,7 +7,18 @@ namespace Vherbaut\LaravelPipelineJobs;
 /**
  * Main entry point for building and dispatching job pipelines.
  *
- * This class provides the API for defining pipeline steps,
- * configuring execution strategies, and dispatching pipelines.
+ * This class provides the static API for creating pipeline builders
+ * from arrays of job class names.
  */
-class JobPipeline {}
+final class JobPipeline
+{
+    /**
+     * Create a new pipeline builder from an array of job class names.
+     *
+     * @param array<int, string> $jobs Fully qualified job class names to add as pipeline steps.
+     */
+    public static function make(array $jobs = []): PipelineBuilder
+    {
+        return new PipelineBuilder($jobs);
+    }
+}
