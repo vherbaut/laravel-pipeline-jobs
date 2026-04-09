@@ -10,6 +10,8 @@ class PipelineServiceProvider extends ServiceProvider
 {
     /**
      * Register the pipeline services into the container.
+     *
+     * @return void
      */
     public function register(): void
     {

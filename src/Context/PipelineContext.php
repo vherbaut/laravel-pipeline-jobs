@@ -32,6 +32,7 @@ class PipelineContext
      * or __serialize are allowed. Closures, resources, and anonymous classes
      * are rejected.
      *
+     * @return void
      * @throws ContextSerializationFailed When a property holds a non-serializable value.
      */
     public function validateSerializable(): void
