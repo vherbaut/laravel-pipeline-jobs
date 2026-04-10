@@ -7,8 +7,10 @@ namespace Vherbaut\LaravelPipelineJobs;
 use Closure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Exceptions\ContextSerializationFailed;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\Execution\QueuedExecutor;
 use Vherbaut\LaravelPipelineJobs\Execution\SyncExecutor;
 
 /**
@@ -22,10 +24,13 @@ final class PipelineBuilder
 
     private PipelineContext|Closure|null $context = null;
 
+    private bool $shouldBeQueued = false;
+
     /**
      * Create a new pipeline builder.
      *
      * @param array<int, string> $jobs Fully qualified job class names to add as steps.
+     * @return void
      */
     public function __construct(array $jobs = [])
     {
@@ -38,6 +43,7 @@ final class PipelineBuilder
      * Append a single step to the pipeline using a job class name.
      *
      * @param string $jobClass Fully qualified class name of the job to execute.
+     * @return static
      */
     public function step(string $jobClass): static
     {
@@ -53,6 +59,7 @@ final class PipelineBuilder
      * or a Closure for deferred resolution at execution time.
      *
      * @param PipelineContext|Closure $context The context instance or a closure that produces one.
+     * @return static
      */
     public function send(PipelineContext|Closure $context): static
     {
@@ -62,22 +69,51 @@ final class PipelineBuilder
     }
 
     /**
-     * Build an immutable PipelineDefinition from the accumulated steps.
+     * Mark the pipeline as asynchronous so steps are dispatched to the queue.
+     *
+     * When set, run() delegates to QueuedExecutor which dispatches the first
+     * step wrapped in a PipelineStepJob. Each job self-dispatches the next
+     * step until the pipeline is complete. Calling this method multiple times
+     * is idempotent.
+     *
+     * @return static
      */
-    public function build(): PipelineDefinition
+    public function shouldBeQueued(): static
     {
-        return new PipelineDefinition(steps: $this->steps);
+        $this->shouldBeQueued = true;
+
+        return $this;
     }
 
     /**
-     * Execute the pipeline synchronously and return the resulting context.
+     * Build an immutable PipelineDefinition from the accumulated steps.
+     *
+     * @return PipelineDefinition The immutable pipeline description ready for execution.
+     *
+     * @throws InvalidPipelineDefinition When the steps array is empty.
+     */
+    public function build(): PipelineDefinition
+    {
+        return new PipelineDefinition(
+            steps: $this->steps,
+            shouldBeQueued: $this->shouldBeQueued,
+        );
+    }
+
+    /**
+     * Execute the pipeline and return the resulting context, or null when queued.
      *
      * Builds the pipeline definition, resolves the context (calling the
-     * closure if one was provided), creates a manifest, and runs all
-     * steps sequentially via SyncExecutor.
+     * closure if one was provided), creates a manifest, and delegates to
+     * SyncExecutor for synchronous execution or QueuedExecutor when
+     * shouldBeQueued() has been called. The queued path dispatches the
+     * first step and returns null immediately.
+     *
+     * @return PipelineContext|null The final pipeline context after sync execution, or null when queued or when no context was provided.
      *
      * @throws InvalidPipelineDefinition When no steps have been defined.
-     * @throws StepExecutionFailed When any step throws an exception.
+     * @throws StepExecutionFailed When any step throws an exception in sync mode.
+     * @throws ContextSerializationFailed When the context contains a non-serializable property in queued mode.
      */
     public function run(): ?PipelineContext
     {
@@ -97,11 +133,17 @@ final class PipelineBuilder
             context: $resolvedContext,
         );
 
+        if ($definition->shouldBeQueued) {
+            return (new QueuedExecutor)->execute($definition, $manifest);
+        }
+
         return (new SyncExecutor)->execute($definition, $manifest);
     }
 
     /**
      * Get the stored context or closure.
+     *
+     * @return PipelineContext|Closure|null The stored context, the deferred closure, or null if none has been set.
      */
     public function getContext(): PipelineContext|Closure|null
     {

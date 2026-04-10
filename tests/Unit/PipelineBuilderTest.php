@@ -142,3 +142,35 @@ it('produces identical PipelineDefinition from fluent and array APIs', function 
         expect($fluentDefinition->steps[$index])->toEqual($step);
     }
 });
+
+it('returns the builder for fluent chaining from shouldBeQueued()', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $result = $builder->shouldBeQueued();
+
+    expect($result)->toBe($builder);
+});
+
+it('defaults shouldBeQueued to false on a fresh builder', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->build();
+
+    expect($definition->shouldBeQueued)->toBeFalse();
+});
+
+it('propagates shouldBeQueued() to the built PipelineDefinition', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->shouldBeQueued()
+        ->build();
+
+    expect($definition->shouldBeQueued)->toBeTrue();
+});
+
+it('treats multiple shouldBeQueued() calls as idempotent', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->shouldBeQueued()
+        ->shouldBeQueued()
+        ->shouldBeQueued()
+        ->build();
+
+    expect($definition->shouldBeQueued)->toBeTrue();
+});
