@@ -35,6 +35,18 @@ final class PipelineBuilder
     }
 
     /**
+     * Append a single step to the pipeline using a job class name.
+     *
+     * @param string $jobClass Fully qualified class name of the job to execute.
+     */
+    public function step(string $jobClass): static
+    {
+        $this->steps[] = StepDefinition::fromJobClass($jobClass);
+
+        return $this;
+    }
+
+    /**
      * Set the context to inject into the pipeline at execution time.
      *
      * Accepts either a PipelineContext instance for immediate use,

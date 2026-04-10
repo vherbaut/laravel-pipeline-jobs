@@ -31,7 +31,7 @@ final class SyncExecutor implements PipelineExecutor
      * @param PipelineDefinition $definition The immutable pipeline description containing steps and configuration.
      * @param PipelineManifest $manifest The mutable execution state carrying context and step progress.
      * @return PipelineContext|null The final pipeline context after execution, or null if the pipeline has no context.
-     * 
+     *
      * @throws StepExecutionFailed When any step throws an exception during execution.
      */
     public function execute(PipelineDefinition $definition, PipelineManifest $manifest): ?PipelineContext

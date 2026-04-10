@@ -20,14 +20,10 @@ beforeEach(function (): void {
     ReadContextJob::$readName = null;
 });
 
-it('executes all steps in order', function (): void {
+it('executes all steps in order', function (Closure $builderFactory): void {
     $context = new SimpleContext;
 
-    $result = (new PipelineBuilder([
-        TrackExecutionJobA::class,
-        TrackExecutionJobB::class,
-        TrackExecutionJobC::class,
-    ]))
+    $builderFactory()
         ->send($context)
         ->run();
 
@@ -36,43 +32,59 @@ it('executes all steps in order', function (): void {
         TrackExecutionJobB::class,
         TrackExecutionJobC::class,
     ]);
-});
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobC::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)
+        ->step(TrackExecutionJobB::class)
+        ->step(TrackExecutionJobC::class),
+]);
 
-it('gives each job the same PipelineContext instance', function (): void {
+it('gives each job the same PipelineContext instance', function (Closure $builderFactory): void {
     $context = new SimpleContext;
 
-    $result = (new PipelineBuilder([
-        EnrichContextJob::class,
-        ReadContextJob::class,
-    ]))
+    $result = $builderFactory()
         ->send($context)
         ->run();
 
     expect($result)->toBe($context);
-});
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        EnrichContextJob::class,
+        ReadContextJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(EnrichContextJob::class)
+        ->step(ReadContextJob::class),
+]);
 
-it('passes context enriched by step N to step N+1', function (): void {
+it('passes context enriched by step N to step N+1', function (Closure $builderFactory): void {
     $context = new SimpleContext;
     $context->name = 'original';
 
-    (new PipelineBuilder([
-        EnrichContextJob::class,
-        ReadContextJob::class,
-    ]))
+    $builderFactory()
         ->send($context)
         ->run();
 
     expect(ReadContextJob::$readName)->toBe('enriched');
-});
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        EnrichContextJob::class,
+        ReadContextJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(EnrichContextJob::class)
+        ->step(ReadContextJob::class),
+]);
 
-it('stops on first failure and does not execute subsequent steps', function (): void {
+it('stops on first failure and does not execute subsequent steps', function (Closure $builderFactory): void {
     $context = new SimpleContext;
 
-    expect(fn () => (new PipelineBuilder([
-        TrackExecutionJobA::class,
-        FailingJob::class,
-        TrackExecutionJobC::class,
-    ]))
+    expect(fn () => $builderFactory()
         ->send($context)
         ->run()
     )->toThrow(StepExecutionFailed::class);
@@ -80,16 +92,23 @@ it('stops on first failure and does not execute subsequent steps', function (): 
     expect(TrackExecutionJob::$executionOrder)->toBe([
         TrackExecutionJobA::class,
     ]);
-});
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        TrackExecutionJobA::class,
+        FailingJob::class,
+        TrackExecutionJobC::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)
+        ->step(FailingJob::class)
+        ->step(TrackExecutionJobC::class),
+]);
 
-it('wraps exception in StepExecutionFailed with pipeline context', function (): void {
+it('wraps exception in StepExecutionFailed with pipeline context', function (Closure $builderFactory): void {
     $context = new SimpleContext;
 
     try {
-        (new PipelineBuilder([
-            TrackExecutionJobA::class,
-            FailingJob::class,
-        ]))
+        $builderFactory()
             ->send($context)
             ->run();
 
@@ -100,28 +119,38 @@ it('wraps exception in StepExecutionFailed with pipeline context', function (): 
             ->and($exception->getMessage())->toContain('Job failed intentionally')
             ->and($exception->getPrevious())->toBeInstanceOf(RuntimeException::class);
     }
-});
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        TrackExecutionJobA::class,
+        FailingJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)
+        ->step(FailingJob::class),
+]);
 
-it('resolves closure context before first step executes', function (): void {
+it('resolves closure context before first step executes', function (Closure $builderFactory): void {
     $context = new SimpleContext;
     $context->name = 'from-closure';
 
-    $result = (new PipelineBuilder([
-        ReadContextJob::class,
-    ]))
+    $result = $builderFactory()
         ->send(fn () => $context)
         ->run();
 
     expect($result)->toBe($context)
         ->and(ReadContextJob::$readName)->toBe('from-closure');
-});
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        ReadContextJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(ReadContextJob::class),
+]);
 
-it('returns the final PipelineContext after all steps', function (): void {
+it('returns the final PipelineContext after all steps', function (Closure $builderFactory): void {
     $context = new SimpleContext;
 
-    $result = (new PipelineBuilder([
-        EnrichContextJob::class,
-    ]))
+    $result = $builderFactory()
         ->send($context)
         ->run();
 
@@ -129,13 +158,16 @@ it('returns the final PipelineContext after all steps', function (): void {
         ->toBeInstanceOf(PipelineContext::class)
         ->toBe($context)
         ->and($result->name)->toBe('enriched');
-});
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        EnrichContextJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(EnrichContextJob::class),
+]);
 
-it('executes steps with null context when no send() is called', function (): void {
-    $result = (new PipelineBuilder([
-        TrackExecutionJobA::class,
-        TrackExecutionJobB::class,
-    ]))
+it('executes steps with null context when no send() is called', function (Closure $builderFactory): void {
+    $result = $builderFactory()
         ->run();
 
     expect($result)->toBeNull()
@@ -143,7 +175,15 @@ it('executes steps with null context when no send() is called', function (): voi
             TrackExecutionJobA::class,
             TrackExecutionJobB::class,
         ]);
-});
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)
+        ->step(TrackExecutionJobB::class),
+]);
 
 it('throws InvalidPipelineDefinition on empty builder', function (): void {
     expect(fn () => (new PipelineBuilder)->run())

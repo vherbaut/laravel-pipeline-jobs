@@ -86,3 +86,59 @@ it('supports method chaining: make then send then build', function () {
     expect($definition)->toBeInstanceOf(PipelineDefinition::class)
         ->and($definition->stepCount())->toBe(2);
 });
+
+it('adds a step via step() and returns the builder for fluent chaining', function () {
+    $builder = new PipelineBuilder;
+
+    $result = $builder->step(FakeJobA::class);
+
+    expect($result)->toBe($builder)
+        ->and($builder->build()->stepCount())->toBe(1)
+        ->and($builder->build()->steps[0]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('accumulates multiple step() calls in order', function () {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->step(FakeJobB::class)
+        ->step(FakeJobC::class);
+
+    $definition = $builder->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class)
+        ->and($definition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobC::class);
+});
+
+it('preserves order when mixing array constructor and step() calls', function () {
+    $builder = (new PipelineBuilder([FakeJobA::class, FakeJobB::class]))
+        ->step(FakeJobC::class);
+
+    $definition = $builder->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class)
+        ->and($definition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobC::class);
+});
+
+it('works with step() after empty constructor', function () {
+    $builder = (new PipelineBuilder)->step(FakeJobA::class);
+
+    $definition = $builder->build();
+
+    expect($definition->stepCount())->toBe(1)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('produces identical PipelineDefinition from fluent and array APIs', function () {
+    $arrayDefinition = (new PipelineBuilder([FakeJobA::class, FakeJobB::class, FakeJobC::class]))->build();
+    $fluentDefinition = (new PipelineBuilder)->step(FakeJobA::class)->step(FakeJobB::class)->step(FakeJobC::class)->build();
+
+    expect($fluentDefinition->stepCount())->toBe($arrayDefinition->stepCount());
+
+    foreach ($arrayDefinition->steps as $index => $step) {
+        expect($fluentDefinition->steps[$index])->toEqual($step);
+    }
+});
