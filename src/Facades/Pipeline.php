@@ -13,6 +13,7 @@ use Vherbaut\LaravelPipelineJobs\JobPipeline;
  * @see JobPipeline
  *
  * @method static \Vherbaut\LaravelPipelineJobs\PipelineBuilder make(array<int, class-string> $jobs = [])
+ * @method static void listen(class-string $eventClass, array<int, class-string> $jobs, \Closure|null $send = null)
  */
 class Pipeline extends Facade
 {

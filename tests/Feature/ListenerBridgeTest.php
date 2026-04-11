@@ -3,9 +3,12 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
+use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderPlacedEvent;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderShippedEvent;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
@@ -99,4 +102,59 @@ it('matches hand-written Listener class behavior for NFR3 structural parity', fu
         ])
         ->and(ReadContextJob::$readName)->toBe($referenceContextName)
         ->and(ReadContextJob::$readName)->toBe('parity-1');
+});
+
+it('registers a pipeline as a listener via Pipeline::listen() with no context resolver', function (): void {
+    Pipeline::listen(TestOrderPlacedEvent::class, [
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+    ]);
+
+    event(new TestOrderPlacedEvent('one-line-shortcut'));
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+    ]);
+});
+
+it('resolves context from the event when Pipeline::listen() is given a send closure', function (): void {
+    Pipeline::listen(
+        TestOrderPlacedEvent::class,
+        [ReadContextJob::class],
+        fn (TestOrderPlacedEvent $event) => tap(new SimpleContext, fn (SimpleContext $ctx) => $ctx->name = $event->orderId),
+    );
+
+    event(new TestOrderPlacedEvent('order-xyz-42'));
+
+    expect(ReadContextJob::$readName)->toBe('order-xyz-42');
+});
+
+it('replaces a single-purpose Listener class with a single-job Pipeline::listen() call', function (): void {
+    Pipeline::listen(TestOrderPlacedEvent::class, [TrackExecutionJobA::class]);
+
+    event(new TestOrderPlacedEvent('single-job'));
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([TrackExecutionJobA::class]);
+});
+
+it('registers independent pipelines for distinct event classes without cross-talk', function (): void {
+    Pipeline::listen(TestOrderPlacedEvent::class, [TrackExecutionJobA::class]);
+    Pipeline::listen(TestOrderShippedEvent::class, [TrackExecutionJobB::class]);
+
+    event(new TestOrderPlacedEvent('placed-1'));
+    $afterPlaced = TrackExecutionJob::$executionOrder;
+
+    TrackExecutionJob::$executionOrder = [];
+
+    event(new TestOrderShippedEvent('shipped-1'));
+    $afterShipped = TrackExecutionJob::$executionOrder;
+
+    expect($afterPlaced)->toBe([TrackExecutionJobA::class])
+        ->and($afterShipped)->toBe([TrackExecutionJobB::class]);
+});
+
+it('throws InvalidPipelineDefinition when Pipeline::listen() is called with an empty jobs array', function (): void {
+    expect(fn () => Pipeline::listen(TestOrderPlacedEvent::class, []))
+        ->toThrow(InvalidPipelineDefinition::class, 'A pipeline must contain at least one step.');
 });
