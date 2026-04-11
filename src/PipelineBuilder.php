@@ -141,6 +141,64 @@ final class PipelineBuilder
     }
 
     /**
+     * Convert this pipeline into a Laravel event listener closure.
+     *
+     * The returned Closure accepts the event instance dispatched by
+     * Laravel's event bus. When invoked, it resolves the pipeline context
+     * by calling the ->send() closure with the event (or using the stored
+     * PipelineContext instance if one was set), builds a fresh
+     * PipelineManifest, and executes the pipeline via SyncExecutor or
+     * QueuedExecutor depending on ->shouldBeQueued().
+     *
+     * The pipeline definition, context source, and queued flag are
+     * captured eagerly at toListener() time. Subsequent mutations to the
+     * builder do NOT affect previously returned closures.
+     *
+     * Context sharing note: when ->send(new PipelineContext) is used
+     * (instance form), the returned closure captures the same instance
+     * by reference. Mutations performed by pipeline steps on that
+     * context will persist across subsequent event dispatches, which
+     * is usually not desired in a listener scenario where the same
+     * closure fires on every event. Prefer the closure form
+     * ->send(fn ($event) => new Ctx(...)) to obtain a fresh context
+     * per event dispatch.
+     *
+     * @return Closure(object): void A listener closure that executes the pipeline for each event.
+     *
+     * @throws InvalidPipelineDefinition When the builder has no steps.
+     */
+    public function toListener(): Closure
+    {
+        $definition = $this->build();
+        $contextSource = $this->context;
+        $shouldBeQueued = $this->shouldBeQueued;
+
+        return function (object $event) use ($definition, $contextSource, $shouldBeQueued): void {
+            $resolvedContext = $contextSource instanceof Closure
+                ? ($contextSource)($event)
+                : $contextSource;
+
+            $stepClasses = array_map(
+                fn (StepDefinition $step): string => $step->jobClass,
+                $definition->steps,
+            );
+
+            $manifest = PipelineManifest::create(
+                stepClasses: $stepClasses,
+                context: $resolvedContext,
+            );
+
+            if ($shouldBeQueued) {
+                (new QueuedExecutor)->execute($definition, $manifest);
+
+                return;
+            }
+
+            (new SyncExecutor)->execute($definition, $manifest);
+        };
+    }
+
+    /**
      * Get the stored context or closure.
      *
      * @return PipelineContext|Closure|null The stored context, the deferred closure, or null if none has been set.

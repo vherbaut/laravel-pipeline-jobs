@@ -8,7 +8,11 @@ use Illuminate\Support\Facades\Facade;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
 
 /**
+ * Facade proxy for JobPipeline providing a familiar Laravel entry point for building pipelines.
+ *
  * @see JobPipeline
+ *
+ * @method static \Vherbaut\LaravelPipelineJobs\PipelineBuilder make(array<int, class-string> $jobs = [])
  */
 class Pipeline extends Facade
 {

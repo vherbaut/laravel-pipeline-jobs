@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Closure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
@@ -173,4 +174,28 @@ it('treats multiple shouldBeQueued() calls as idempotent', function () {
         ->build();
 
     expect($definition->shouldBeQueued)->toBeTrue();
+});
+
+it('returns a Closure from toListener()', function () {
+    $builder = (new PipelineBuilder([FakeJobA::class]))
+        ->send(new PipelineContext);
+
+    expect($builder->toListener())->toBeInstanceOf(Closure::class);
+});
+
+it('throws InvalidPipelineDefinition when toListener() is called on an empty builder', function () {
+    $builder = new PipelineBuilder;
+
+    expect(fn () => $builder->toListener())
+        ->toThrow(InvalidPipelineDefinition::class, 'A pipeline must contain at least one step.');
+});
+
+it('returns distinct Closure instances on repeated toListener() calls', function () {
+    $builder = (new PipelineBuilder([FakeJobA::class]))
+        ->send(new PipelineContext);
+
+    $first = $builder->toListener();
+    $second = $builder->toListener();
+
+    expect($first)->not->toBe($second);
 });
