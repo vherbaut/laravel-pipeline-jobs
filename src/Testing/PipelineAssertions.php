@@ -361,6 +361,131 @@ trait PipelineAssertions
     }
 
     /**
+     * Assert that compensation was triggered during a recorded pipeline run.
+     *
+     * Requires recording mode (Pipeline::fake()->recording()). Fails with a
+     * clear message if no compensation logic executed after the failure.
+     *
+     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
+     * @return void
+     */
+    public function assertCompensationWasTriggered(?int $pipelineIndex = null): void
+    {
+        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
+
+        $this->assertRecordingMode($recorded);
+
+        PHPUnit::assertTrue(
+            $recorded->compensationTriggered,
+            'Expected compensation to have been triggered, but it was not.',
+        );
+    }
+
+    /**
+     * Assert that compensation was NOT triggered during a recorded pipeline run.
+     *
+     * Requires recording mode (Pipeline::fake()->recording()). Fails if
+     * compensation was triggered.
+     *
+     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
+     * @return void
+     */
+    public function assertCompensationNotTriggered(?int $pipelineIndex = null): void
+    {
+        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
+
+        $this->assertRecordingMode($recorded);
+
+        PHPUnit::assertFalse(
+            $recorded->compensationTriggered,
+            sprintf(
+                "Expected compensation to NOT have been triggered, but it was.\n\nCompensation steps executed: [%s]",
+                implode(', ', array_map(fn (string $s): string => class_basename($s), $recorded->compensationSteps)),
+            ),
+        );
+    }
+
+    /**
+     * Assert that a specific compensation job was executed during a recorded pipeline run.
+     *
+     * Requires recording mode (Pipeline::fake()->recording()). Fails with a
+     * clear message listing actual compensation jobs if the given class was not found.
+     *
+     * @param string $jobClass Fully qualified class name of the compensation job expected to have run.
+     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
+     * @return void
+     */
+    public function assertCompensationRan(string $jobClass, ?int $pipelineIndex = null): void
+    {
+        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
+
+        $this->assertRecordingMode($recorded);
+
+        PHPUnit::assertContains(
+            $jobClass,
+            $recorded->compensationSteps,
+            sprintf(
+                "Expected compensation job [%s] to have been executed, but it was not.\n\nActual compensation steps: [%s]",
+                class_basename($jobClass),
+                implode(', ', array_map(fn (string $s): string => class_basename($s), $recorded->compensationSteps)),
+            ),
+        );
+    }
+
+    /**
+     * Assert that a specific compensation job was NOT executed during a recorded pipeline run.
+     *
+     * Requires recording mode (Pipeline::fake()->recording()). Fails if the
+     * given compensation class was found in the executed compensation steps.
+     *
+     * @param string $jobClass Fully qualified class name of the compensation job expected to NOT have run.
+     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
+     * @return void
+     */
+    public function assertCompensationNotRan(string $jobClass, ?int $pipelineIndex = null): void
+    {
+        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
+
+        $this->assertRecordingMode($recorded);
+
+        PHPUnit::assertNotContains(
+            $jobClass,
+            $recorded->compensationSteps,
+            sprintf(
+                'Expected compensation job [%s] to NOT have been executed, but it was present in the compensation steps.',
+                class_basename($jobClass),
+            ),
+        );
+    }
+
+    /**
+     * Assert that compensation jobs were executed in exactly the given order.
+     *
+     * Requires recording mode (Pipeline::fake()->recording()). Fails with
+     * actual vs expected comparison on mismatch.
+     *
+     * @param array<int, string> $expectedJobs Fully qualified compensation class names in expected execution order.
+     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
+     * @return void
+     */
+    public function assertCompensationExecutedInOrder(array $expectedJobs, ?int $pipelineIndex = null): void
+    {
+        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
+
+        $this->assertRecordingMode($recorded);
+
+        PHPUnit::assertSame(
+            $expectedJobs,
+            $recorded->compensationSteps,
+            sprintf(
+                "Compensation steps were not executed in the expected order.\n\nExpected: [%s]\nActual:   [%s]",
+                implode(', ', array_map(fn (string $s): string => class_basename($s), $expectedJobs)),
+                implode(', ', array_map(fn (string $s): string => class_basename($s), $recorded->compensationSteps)),
+            ),
+        );
+    }
+
+    /**
      * Assert that recording mode was active for the given recorded pipeline.
      *
      * @param RecordedPipeline $recorded The recorded pipeline to check.

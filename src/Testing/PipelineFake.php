@@ -101,6 +101,8 @@ class PipelineFake
      * @param array<int, string> $executedSteps Ordered list of completed step class names (recording mode only).
      * @param array<int, PipelineContext> $contextSnapshots Per-step context snapshots in execution order (recording mode only).
      * @param bool $wasRecording Whether this pipeline was executed in recording mode.
+     * @param bool $compensationTriggered Whether compensation was triggered during execution.
+     * @param array<int, string> $compensationSteps Ordered list of compensation class names that were executed.
      * @return void
      */
     public function recordPipeline(
@@ -109,6 +111,8 @@ class PipelineFake
         array $executedSteps = [],
         array $contextSnapshots = [],
         bool $wasRecording = false,
+        bool $compensationTriggered = false,
+        array $compensationSteps = [],
     ): void {
         $this->recordedPipelines[] = new RecordedPipeline(
             definition: $definition,
@@ -116,6 +120,8 @@ class PipelineFake
             executedSteps: $executedSteps,
             contextSnapshots: $contextSnapshots,
             wasRecording: $wasRecording,
+            compensationTriggered: $compensationTriggered,
+            compensationSteps: $compensationSteps,
         );
     }
 

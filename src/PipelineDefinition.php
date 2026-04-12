@@ -56,4 +56,22 @@ final class PipelineDefinition
     {
         return count($this->steps);
     }
+
+    /**
+     * Build a compensation mapping from the pipeline steps.
+     *
+     * @return array<string, string> Map of step class name to compensation class name.
+     */
+    public function compensationMapping(): array
+    {
+        $mapping = [];
+
+        foreach ($this->steps as $step) {
+            if ($step->compensationJobClass !== null) {
+                $mapping[$step->jobClass] = $step->compensationJobClass;
+            }
+        }
+
+        return $mapping;
+    }
 }

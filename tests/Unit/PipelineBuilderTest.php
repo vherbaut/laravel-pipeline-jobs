@@ -199,3 +199,67 @@ it('returns distinct Closure instances on repeated toListener() calls', function
 
     expect($first)->not->toBe($second);
 });
+
+// --- compensateWith() ---
+
+it('sets compensationJobClass on the last step via compensateWith()', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->compensateWith(FakeJobB::class)
+        ->build();
+
+    expect($definition->steps[0]->compensationJobClass)->toBe(FakeJobB::class);
+});
+
+it('returns the builder for fluent chaining from compensateWith()', function () {
+    $builder = (new PipelineBuilder)->step(FakeJobA::class);
+
+    $result = $builder->compensateWith(FakeJobB::class);
+
+    expect($result)->toBe($builder);
+});
+
+it('throws InvalidPipelineDefinition when compensateWith() is called with no steps', function () {
+    $builder = new PipelineBuilder;
+
+    expect(fn () => $builder->compensateWith(FakeJobA::class))
+        ->toThrow(InvalidPipelineDefinition::class);
+});
+
+it('throws InvalidPipelineDefinition when compensateWith() is called twice on the same step', function () {
+    $builder = (new PipelineBuilder)->step(FakeJobA::class)->compensateWith(FakeJobB::class);
+
+    expect(fn () => $builder->compensateWith(FakeJobC::class))
+        ->toThrow(InvalidPipelineDefinition::class, 'already defined');
+});
+
+it('only sets compensation on the last step, not earlier ones', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->step(FakeJobB::class)
+        ->compensateWith(FakeJobC::class)
+        ->build();
+
+    expect($definition->steps[0]->compensationJobClass)->toBeNull()
+        ->and($definition->steps[1]->compensationJobClass)->toBe(FakeJobC::class);
+});
+
+it('preserves all original StepDefinition properties when compensateWith() rebuilds the step', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->compensateWith(FakeJobB::class)
+        ->build();
+
+    $step = $definition->steps[0];
+
+    expect($step->jobClass)->toBe(FakeJobA::class)
+        ->and($step->compensationJobClass)->toBe(FakeJobB::class)
+        ->and($step->condition)->toBeNull()
+        ->and($step->conditionNegated)->toBeFalse()
+        ->and($step->queue)->toBeNull()
+        ->and($step->connection)->toBeNull()
+        ->and($step->retry)->toBeNull()
+        ->and($step->backoff)->toBeNull()
+        ->and($step->timeout)->toBeNull()
+        ->and($step->sync)->toBeFalse();
+});
