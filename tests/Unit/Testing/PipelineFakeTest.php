@@ -8,7 +8,6 @@ use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Testing\FakePipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\Testing\PipelineFake;
-use Vherbaut\LaravelPipelineJobs\Testing\RecordedPipeline;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
@@ -34,7 +33,7 @@ it('records pipeline executions without running jobs', function (): void {
     expect(TrackExecutionJob::$executionOrder)->toBeEmpty();
 });
 
-it('stores recorded pipelines as RecordedPipeline objects', function (): void {
+it('stores recorded pipelines as PipelineDefinition objects', function (): void {
     $fake = Pipeline::fake();
 
     Pipeline::make([FakeJobA::class, FakeJobB::class])->run();
@@ -42,8 +41,7 @@ it('stores recorded pipelines as RecordedPipeline objects', function (): void {
     $recorded = $fake->recordedPipelines();
 
     expect($recorded)->toHaveCount(1)
-        ->and($recorded[0])->toBeInstanceOf(RecordedPipeline::class)
-        ->and($recorded[0]->definition)->toBeInstanceOf(PipelineDefinition::class);
+        ->and($recorded[0])->toBeInstanceOf(PipelineDefinition::class);
 });
 
 it('records multiple pipeline executions independently', function (): void {

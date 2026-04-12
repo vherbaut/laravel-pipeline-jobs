@@ -15,18 +15,10 @@ use Vherbaut\LaravelPipelineJobs\Testing\PipelineFake;
  *
  * @method static \Vherbaut\LaravelPipelineJobs\PipelineBuilder|\Vherbaut\LaravelPipelineJobs\Testing\FakePipelineBuilder make(array<int, class-string> $jobs = [])
  * @method static void listen(class-string $eventClass, array<int, class-string> $jobs, \Closure|null $send = null)
- * @method static \Vherbaut\LaravelPipelineJobs\Testing\PipelineFake recording()
  * @method static void assertPipelineRan(\Closure|null $callback = null)
  * @method static void assertPipelineRanWith(array<int, string> $expectedJobs)
  * @method static void assertNoPipelinesRan()
  * @method static void assertPipelineRanTimes(int $count)
- * @method static void assertStepExecuted(string $jobClass, int|null $pipelineIndex = null)
- * @method static void assertStepNotExecuted(string $jobClass, int|null $pipelineIndex = null)
- * @method static void assertStepsExecutedInOrder(array<int, string> $expectedJobs, int|null $pipelineIndex = null)
- * @method static void assertContextHas(string $property, mixed $expected, int|null $pipelineIndex = null)
- * @method static void assertContext(\Closure $callback, int|null $pipelineIndex = null)
- * @method static \Vherbaut\LaravelPipelineJobs\Context\PipelineContext|null getRecordedContext(int|null $pipelineIndex = null)
- * @method static \Vherbaut\LaravelPipelineJobs\Context\PipelineContext|null getContextAfterStep(string $jobClass, int|null $pipelineIndex = null)
  */
 class Pipeline extends Facade
 {

@@ -6,7 +6,6 @@ namespace Vherbaut\LaravelPipelineJobs\Testing;
 
 use Closure;
 use PHPUnit\Framework\Assert as PHPUnit;
-use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
@@ -41,10 +40,7 @@ trait PipelineAssertions
             return;
         }
 
-        $matched = array_filter(
-            $recorded,
-            fn (RecordedPipeline $recorded): bool => $callback($recorded->definition),
-        );
+        $matched = array_filter($recorded, $callback);
 
         PHPUnit::assertNotEmpty(
             $matched,
@@ -78,10 +74,10 @@ trait PipelineAssertions
 
         $found = false;
 
-        foreach ($recorded as $recordedPipeline) {
+        foreach ($recorded as $definition) {
             $actualJobs = array_map(
                 fn (StepDefinition $step): string => $step->jobClass,
-                $recordedPipeline->definition->steps,
+                $definition->steps,
             );
 
             if ($actualJobs === $expectedJobs) {
@@ -93,9 +89,9 @@ trait PipelineAssertions
 
         if (! $found) {
             $allRecorded = array_map(
-                fn (RecordedPipeline $rp): string => '['.implode(', ', array_map(
+                fn (PipelineDefinition $def): string => '['.implode(', ', array_map(
                     fn (StepDefinition $step): string => class_basename($step->jobClass),
-                    $rp->definition->steps,
+                    $def->steps,
                 )).']',
                 $recorded,
             );
@@ -127,10 +123,10 @@ trait PipelineAssertions
                 "Expected no pipelines to have been dispatched, but %d were recorded:\n%s",
                 count($recorded),
                 implode("\n", array_map(
-                    fn (RecordedPipeline $rp, int $i): string => sprintf(
+                    fn (PipelineDefinition $def, int $i): string => sprintf(
                         '  %d. [%s]',
                         $i + 1,
-                        implode(', ', array_map(fn (StepDefinition $step): string => class_basename($step->jobClass), $rp->definition->steps)),
+                        implode(', ', array_map(fn (StepDefinition $step): string => class_basename($step->jobClass), $def->steps)),
                     ),
                     $recorded,
                     array_keys($recorded),
@@ -157,222 +153,6 @@ trait PipelineAssertions
                 $count,
                 $actual,
             ),
-        );
-    }
-
-    /**
-     * Assert that the given job class was executed during a recorded pipeline run.
-     *
-     * Requires recording mode (Pipeline::fake()->recording()). Fails with
-     * a clear message listing the actual executed steps if the job was not found.
-     *
-     * @param string $jobClass Fully qualified job class name expected to have executed.
-     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
-     * @return void
-     */
-    public function assertStepExecuted(string $jobClass, ?int $pipelineIndex = null): void
-    {
-        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
-
-        $this->assertRecordingMode($recorded);
-
-        PHPUnit::assertContains(
-            $jobClass,
-            $recorded->executedSteps,
-            sprintf(
-                "Expected step [%s] to have been executed, but it was not.\n\nActual executed steps: [%s]",
-                class_basename($jobClass),
-                implode(', ', array_map(fn (string $s): string => class_basename($s), $recorded->executedSteps)),
-            ),
-        );
-    }
-
-    /**
-     * Assert that the given job class was NOT executed during a recorded pipeline run.
-     *
-     * Requires recording mode (Pipeline::fake()->recording()).
-     *
-     * @param string $jobClass Fully qualified job class name expected to NOT have executed.
-     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
-     * @return void
-     */
-    public function assertStepNotExecuted(string $jobClass, ?int $pipelineIndex = null): void
-    {
-        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
-
-        $this->assertRecordingMode($recorded);
-
-        PHPUnit::assertNotContains(
-            $jobClass,
-            $recorded->executedSteps,
-            sprintf(
-                'Expected step [%s] to NOT have been executed, but it was present in the executed steps.',
-                class_basename($jobClass),
-            ),
-        );
-    }
-
-    /**
-     * Assert that the given job classes were executed in exactly the given order.
-     *
-     * Requires recording mode (Pipeline::fake()->recording()). Fails with
-     * actual vs expected comparison on mismatch.
-     *
-     * @param array<int, string> $expectedJobs Fully qualified job class names in expected execution order.
-     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
-     * @return void
-     */
-    public function assertStepsExecutedInOrder(array $expectedJobs, ?int $pipelineIndex = null): void
-    {
-        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
-
-        $this->assertRecordingMode($recorded);
-
-        PHPUnit::assertSame(
-            $expectedJobs,
-            $recorded->executedSteps,
-            sprintf(
-                "Steps were not executed in the expected order.\n\nExpected: [%s]\nActual:   [%s]",
-                implode(', ', array_map(fn (string $s): string => class_basename($s), $expectedJobs)),
-                implode(', ', array_map(fn (string $s): string => class_basename($s), $recorded->executedSteps)),
-            ),
-        );
-    }
-
-    /**
-     * Assert that the recorded context has a property matching the expected value.
-     *
-     * In recording mode, checks the final context after execution.
-     * In fake mode, checks the sent context.
-     *
-     * @param string $property The property name to check on the context.
-     * @param mixed $expected The expected value of the property.
-     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
-     * @return void
-     */
-    public function assertContextHas(string $property, mixed $expected, ?int $pipelineIndex = null): void
-    {
-        $context = $this->getRecordedContext($pipelineIndex);
-
-        PHPUnit::assertNotNull(
-            $context,
-            'No context was recorded for this pipeline. Ensure send() was called with a PipelineContext.',
-        );
-
-        PHPUnit::assertTrue(
-            property_exists($context, $property),
-            sprintf(
-                'Property [%s] does not exist on context class [%s].',
-                $property,
-                $context::class,
-            ),
-        );
-
-        PHPUnit::assertSame(
-            $expected,
-            $context->{$property},
-            sprintf(
-                "Context property [%s] does not match expected value.\n\nExpected: %s\nActual:   %s",
-                $property,
-                var_export($expected, true),
-                var_export($context->{$property}, true),
-            ),
-        );
-    }
-
-    /**
-     * Assert that the recorded context satisfies the given callback.
-     *
-     * The callback receives the recorded PipelineContext and must return true.
-     * In recording mode, receives the final context. In fake mode, receives
-     * the sent context.
-     *
-     * @param Closure(PipelineContext): bool $callback A closure that receives the context and returns true if satisfied.
-     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
-     * @return void
-     */
-    public function assertContext(Closure $callback, ?int $pipelineIndex = null): void
-    {
-        $context = $this->getRecordedContext($pipelineIndex);
-
-        PHPUnit::assertNotNull(
-            $context,
-            'No context was recorded for this pipeline. Ensure send() was called with a PipelineContext.',
-        );
-
-        $result = $callback($context);
-
-        PHPUnit::assertTrue(
-            $result,
-            'The context assertion callback returned false. No matching context found.',
-        );
-    }
-
-    /**
-     * Get the context snapshot captured immediately after a specific step completed.
-     *
-     * Only available in recording mode (Pipeline::fake()->recording()).
-     * Returns a deep clone of the context as it was after the step finished.
-     * When a step appears multiple times, returns the snapshot from the last occurrence.
-     *
-     * @param string $jobClass Fully qualified class name of the step to get the snapshot for.
-     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
-     * @return PipelineContext The cloned context snapshot.
-     */
-    public function getContextAfterStep(string $jobClass, ?int $pipelineIndex = null): PipelineContext
-    {
-        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
-
-        $wasRecording = $recorded->wasRecording;
-
-        PHPUnit::assertTrue(
-            $wasRecording,
-            sprintf(
-                'No context snapshots available. Context snapshots require Pipeline::fake()->recording() mode. Step [%s] has no snapshot.',
-                class_basename($jobClass),
-            ),
-        );
-
-        $indices = array_keys($recorded->executedSteps, $jobClass, true);
-
-        PHPUnit::assertNotEmpty(
-            $indices,
-            sprintf(
-                "No context snapshot found for step [%s].\n\nExecuted steps: [%s]",
-                class_basename($jobClass),
-                implode(', ', array_map(fn (string $s): string => class_basename($s), $recorded->executedSteps)),
-            ),
-        );
-
-        /** @var int $lastIndex */
-        $lastIndex = end($indices);
-
-        PHPUnit::assertArrayHasKey(
-            $lastIndex,
-            $recorded->contextSnapshots,
-            sprintf(
-                'Context snapshot at index %d not found for step [%s]. The step may have run without a context.',
-                $lastIndex,
-                class_basename($jobClass),
-            ),
-        );
-
-        return $recorded->contextSnapshots[$lastIndex];
-    }
-
-    /**
-     * Assert that recording mode was active for the given recorded pipeline.
-     *
-     * @param RecordedPipeline $recorded The recorded pipeline to check.
-     * @return void
-     */
-    private function assertRecordingMode(RecordedPipeline $recorded): void
-    {
-        $wasRecording = $recorded->wasRecording;
-
-        PHPUnit::assertTrue(
-            $wasRecording,
-            'Step execution assertions require Pipeline::fake()->recording() mode. No execution data was recorded.',
         );
     }
 }

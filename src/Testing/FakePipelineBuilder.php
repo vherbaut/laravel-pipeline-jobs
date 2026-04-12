@@ -6,11 +6,9 @@ namespace Vherbaut\LaravelPipelineJobs\Testing;
 
 use Closure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
-use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
-use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
 /**
  * A pipeline builder decorator that records pipeline definitions
@@ -89,27 +87,17 @@ final class FakePipelineBuilder
     }
 
     /**
-     * Record the pipeline definition, optionally executing it in recording mode.
+     * Record the pipeline definition without executing any jobs.
      *
-     * In default fake mode, builds the PipelineDefinition, resolves the sent
-     * context, and stores both without executing any jobs.
+     * Builds the PipelineDefinition and stores it in the PipelineFake
+     * for later assertion. No job handle() method is ever called.
      *
-     * In recording mode (Pipeline::fake()->recording()), executes the pipeline
-     * synchronously via RecordingExecutor, capturing per-step context snapshots
-     * and the list of completed steps alongside the definition.
-     *
-     * @return PipelineContext|null The final context in recording mode, or null in fake mode.
+     * @return null Always returns null since no execution occurs.
      */
-    public function run(): ?PipelineContext
+    public function run(): null
     {
         $definition = $this->builder->build();
-        $resolvedContext = $this->resolveContext();
-
-        if ($this->fake->isRecording()) {
-            return $this->executeWithRecording($definition, $resolvedContext);
-        }
-
-        $this->fake->recordPipeline($definition, $resolvedContext);
+        $this->fake->recordPipeline($definition);
 
         return null;
     }
@@ -117,9 +105,8 @@ final class FakePipelineBuilder
     /**
      * Record the pipeline definition and return a no-op listener closure.
      *
-     * Builds the PipelineDefinition, resolves the sent context, stores
-     * both in the PipelineFake, and returns a closure that does nothing
-     * when invoked.
+     * Builds the PipelineDefinition, stores it in the PipelineFake,
+     * and returns a closure that does nothing when invoked.
      *
      * @return Closure(object): void A no-op listener closure.
      *
@@ -128,8 +115,7 @@ final class FakePipelineBuilder
     public function toListener(): Closure
     {
         $definition = $this->builder->build();
-        $resolvedContext = $this->resolveContext();
-        $this->fake->recordPipeline($definition, $resolvedContext);
+        $this->fake->recordPipeline($definition);
 
         return function (object $event): void {};
     }
@@ -142,79 +128,5 @@ final class FakePipelineBuilder
     public function getContext(): PipelineContext|Closure|null
     {
         return $this->builder->getContext();
-    }
-
-    /**
-     * Execute the pipeline via RecordingExecutor and record the full trace.
-     *
-     * Creates a PipelineManifest, runs all steps synchronously, captures
-     * per-step context snapshots and completed steps, then records
-     * everything in the PipelineFake.
-     *
-     * @param PipelineDefinition $definition The built pipeline definition.
-     * @param PipelineContext|null $resolvedContext The resolved context to send.
-     * @return PipelineContext|null The final context after execution.
-     */
-    private function executeWithRecording(PipelineDefinition $definition, ?PipelineContext $resolvedContext): ?PipelineContext
-    {
-        $stepClasses = array_map(
-            fn (StepDefinition $step): string => $step->jobClass,
-            $definition->steps,
-        );
-
-        $manifest = PipelineManifest::create(
-            stepClasses: $stepClasses,
-            context: $resolvedContext,
-        );
-
-        $executor = new RecordingExecutor;
-        $finalContext = $executor->execute($definition, $manifest);
-
-        $this->fake->recordPipeline(
-            definition: $definition,
-            recordedContext: $finalContext,
-            executedSteps: $executor->executedSteps(),
-            contextSnapshots: $executor->contextSnapshots(),
-            wasRecording: true,
-        );
-
-        return $finalContext;
-    }
-
-    /**
-     * Resolve the stored context for recording.
-     *
-     * If the context is a Closure, it is called with no arguments.
-     * If it is a PipelineContext instance, it is returned as-is.
-     * If null, null is returned.
-     *
-     * @return PipelineContext|null The resolved context, or null if none was set.
-     *
-     * @throws \InvalidArgumentException When a closure returns a non-null, non-PipelineContext value.
-     */
-    private function resolveContext(): ?PipelineContext
-    {
-        $context = $this->builder->getContext();
-
-        if ($context instanceof Closure) {
-            $resolved = ($context)();
-
-            if ($resolved === null) {
-                return null;
-            }
-
-            if (! $resolved instanceof PipelineContext) {
-                throw new \InvalidArgumentException(
-                    sprintf(
-                        'The context closure must return a PipelineContext or null, got %s.',
-                        get_debug_type($resolved),
-                    ),
-                );
-            }
-
-            return $resolved;
-        }
-
-        return $context;
     }
 }
