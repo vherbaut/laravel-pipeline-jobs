@@ -8,6 +8,7 @@ use Closure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -47,6 +48,24 @@ final class FakePipelineBuilder
     public function step(string $jobClass): static
     {
         $this->builder->step($jobClass);
+
+        return $this;
+    }
+
+    /**
+     * Assign a compensation job to the last added step for saga rollback.
+     *
+     * Delegates to the underlying PipelineBuilder. Must be called after
+     * at least one step() or constructor-provided job class.
+     *
+     * @param string $compensationClass Fully qualified class name of the compensation job.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When no steps have been added yet.
+     */
+    public function compensateWith(string $compensationClass): static
+    {
+        $this->builder->compensateWith($compensationClass);
 
         return $this;
     }
@@ -162,23 +181,46 @@ final class FakePipelineBuilder
             $definition->steps,
         );
 
+        $compensationMapping = [];
+        foreach ($definition->steps as $step) {
+            if ($step->compensationJobClass !== null) {
+                $compensationMapping[$step->jobClass] = $step->compensationJobClass;
+            }
+        }
+
         $manifest = PipelineManifest::create(
             stepClasses: $stepClasses,
             context: $resolvedContext,
+            compensationMapping: $compensationMapping,
         );
 
         $executor = new RecordingExecutor;
-        $finalContext = $executor->execute($definition, $manifest);
 
-        $this->fake->recordPipeline(
-            definition: $definition,
-            recordedContext: $finalContext,
-            executedSteps: $executor->executedSteps(),
-            contextSnapshots: $executor->contextSnapshots(),
-            wasRecording: true,
-        );
+        try {
+            $finalContext = $executor->execute($definition, $manifest);
 
-        return $finalContext;
+            $this->fake->recordPipeline(
+                definition: $definition,
+                recordedContext: $finalContext,
+                executedSteps: $executor->executedSteps(),
+                contextSnapshots: $executor->contextSnapshots(),
+                wasRecording: true,
+            );
+
+            return $finalContext;
+        } catch (StepExecutionFailed) {
+            $this->fake->recordPipeline(
+                definition: $definition,
+                recordedContext: $manifest->context,
+                executedSteps: $executor->executedSteps(),
+                contextSnapshots: $executor->contextSnapshots(),
+                wasRecording: true,
+                compensationTriggered: $executor->compensationTriggered(),
+                compensationSteps: $executor->compensationSteps(),
+            );
+
+            return null;
+        }
     }
 
     /**

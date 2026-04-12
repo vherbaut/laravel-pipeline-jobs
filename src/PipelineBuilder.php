@@ -53,6 +53,42 @@ final class PipelineBuilder
     }
 
     /**
+     * Assign a compensation job to the last added step for saga rollback.
+     *
+     * Replaces the last StepDefinition with a new instance that carries
+     * the given compensation class. All other properties of the original
+     * step are preserved. Must be called after at least one step() or
+     * constructor-provided job class.
+     *
+     * @param string $compensationClass Fully qualified class name of the compensation job.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When no steps have been added yet.
+     */
+    public function compensateWith(string $compensationClass): static
+    {
+        if ($this->steps === []) {
+            throw new InvalidPipelineDefinition('Cannot call compensateWith() before adding a step.');
+        }
+
+        $lastStep = array_pop($this->steps);
+        $this->steps[] = new StepDefinition(
+            jobClass: $lastStep->jobClass,
+            compensationJobClass: $compensationClass,
+            condition: $lastStep->condition,
+            conditionNegated: $lastStep->conditionNegated,
+            queue: $lastStep->queue,
+            connection: $lastStep->connection,
+            retry: $lastStep->retry,
+            backoff: $lastStep->backoff,
+            timeout: $lastStep->timeout,
+            sync: $lastStep->sync,
+        );
+
+        return $this;
+    }
+
+    /**
      * Set the context to inject into the pipeline at execution time.
      *
      * Accepts either a PipelineContext instance for immediate use,
@@ -128,9 +164,12 @@ final class PipelineBuilder
             $definition->steps,
         );
 
+        $compensationMapping = $this->buildCompensationMapping($definition);
+
         $manifest = PipelineManifest::create(
             stepClasses: $stepClasses,
             context: $resolvedContext,
+            compensationMapping: $compensationMapping,
         );
 
         if ($definition->shouldBeQueued) {
@@ -173,7 +212,9 @@ final class PipelineBuilder
         $contextSource = $this->context;
         $shouldBeQueued = $this->shouldBeQueued;
 
-        return function (object $event) use ($definition, $contextSource, $shouldBeQueued): void {
+        $compensationMapping = $this->buildCompensationMapping($definition);
+
+        return function (object $event) use ($definition, $contextSource, $shouldBeQueued, $compensationMapping): void {
             $resolvedContext = $contextSource instanceof Closure
                 ? ($contextSource)($event)
                 : $contextSource;
@@ -186,6 +227,7 @@ final class PipelineBuilder
             $manifest = PipelineManifest::create(
                 stepClasses: $stepClasses,
                 context: $resolvedContext,
+                compensationMapping: $compensationMapping,
             );
 
             if ($shouldBeQueued) {
@@ -206,5 +248,24 @@ final class PipelineBuilder
     public function getContext(): PipelineContext|Closure|null
     {
         return $this->context;
+    }
+
+    /**
+     * Build a compensation mapping from the pipeline definition's steps.
+     *
+     * @param PipelineDefinition $definition The built pipeline definition.
+     * @return array<string, string> Map of step class name to compensation class name.
+     */
+    private function buildCompensationMapping(PipelineDefinition $definition): array
+    {
+        $mapping = [];
+
+        foreach ($definition->steps as $step) {
+            if ($step->compensationJobClass !== null) {
+                $mapping[$step->jobClass] = $step->compensationJobClass;
+            }
+        }
+
+        return $mapping;
     }
 }

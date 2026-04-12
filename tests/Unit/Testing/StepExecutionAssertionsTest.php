@@ -5,21 +5,29 @@ declare(strict_types=1);
 use PHPUnit\Framework\ExpectationFailedException;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Testing\RecordedPipeline;
 use Vherbaut\LaravelPipelineJobs\Testing\RecordingExecutor;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobA;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobB;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobB;
 
 beforeEach(function (): void {
     TrackExecutionJob::$executionOrder = [];
     ReadContextJob::$readName = null;
+    CompensateJobA::$executed = [];
+    CompensateJobB::$executed = [];
 });
 
 // --- 8.2: assertStepExecuted ---
@@ -302,4 +310,87 @@ it('assertions fail with clear message when pipeline index is out of bounds', fu
 
     expect(fn () => Pipeline::assertStepExecuted(EnrichContextJob::class, 5))
         ->toThrow(ExpectationFailedException::class, 'out of bounds');
+});
+
+// --- RecordingExecutor compensation ---
+
+it('RecordingExecutor runs compensation in reverse order on step failure', function (): void {
+    CompensateJobA::$executed = [];
+    CompensateJobB::$executed = [];
+
+    $definition = new PipelineDefinition(
+        steps: [
+            new StepDefinition(jobClass: TrackExecutionJobA::class, compensationJobClass: CompensateJobA::class),
+            new StepDefinition(jobClass: TrackExecutionJobB::class, compensationJobClass: CompensateJobB::class),
+            StepDefinition::fromJobClass(FailingJob::class),
+        ],
+    );
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class, TrackExecutionJobB::class, FailingJob::class],
+        context: new SimpleContext,
+        compensationMapping: [
+            TrackExecutionJobA::class => CompensateJobA::class,
+            TrackExecutionJobB::class => CompensateJobB::class,
+        ],
+    );
+
+    $executor = new RecordingExecutor;
+
+    expect(fn () => $executor->execute($definition, $manifest))
+        ->toThrow(StepExecutionFailed::class);
+
+    expect($executor->compensationTriggered())->toBeTrue()
+        ->and($executor->compensationSteps())->toBe([CompensateJobB::class, CompensateJobA::class]);
+});
+
+it('RecordingExecutor reports no compensation when no mapping exists', function (): void {
+    $definition = new PipelineDefinition(
+        steps: [
+            StepDefinition::fromJobClass(EnrichContextJob::class),
+            StepDefinition::fromJobClass(FailingJob::class),
+        ],
+    );
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [EnrichContextJob::class, FailingJob::class],
+        context: new SimpleContext,
+    );
+
+    $executor = new RecordingExecutor;
+
+    expect(fn () => $executor->execute($definition, $manifest))
+        ->toThrow(StepExecutionFailed::class);
+
+    expect($executor->compensationTriggered())->toBeFalse()
+        ->and($executor->compensationSteps())->toBe([]);
+});
+
+it('RecordingExecutor only compensates completed steps that have compensation defined', function (): void {
+    CompensateJobA::$executed = [];
+    CompensateJobB::$executed = [];
+
+    $definition = new PipelineDefinition(
+        steps: [
+            new StepDefinition(jobClass: TrackExecutionJobA::class, compensationJobClass: CompensateJobA::class),
+            StepDefinition::fromJobClass(TrackExecutionJobB::class), // no compensation
+            StepDefinition::fromJobClass(FailingJob::class),
+        ],
+    );
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class, TrackExecutionJobB::class, FailingJob::class],
+        context: new SimpleContext,
+        compensationMapping: [
+            TrackExecutionJobA::class => CompensateJobA::class,
+        ],
+    );
+
+    $executor = new RecordingExecutor;
+
+    expect(fn () => $executor->execute($definition, $manifest))
+        ->toThrow(StepExecutionFailed::class);
+
+    expect($executor->compensationTriggered())->toBeTrue()
+        ->and($executor->compensationSteps())->toBe([CompensateJobA::class]);
 });

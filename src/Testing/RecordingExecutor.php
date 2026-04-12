@@ -32,6 +32,11 @@ final class RecordingExecutor implements PipelineExecutor
     /** @var array<int, PipelineContext> */
     private array $contextSnapshots = [];
 
+    private bool $compensationTriggered = false;
+
+    /** @var array<int, string> */
+    private array $compensationSteps = [];
+
     /**
      * Execute all steps synchronously, capturing context snapshots after each step.
      *
@@ -63,6 +68,8 @@ final class RecordingExecutor implements PipelineExecutor
                     $this->contextSnapshots[] = unserialize(serialize($manifest->context));
                 }
             } catch (Throwable $exception) {
+                $this->runCompensation($manifest);
+
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,
                     $manifest->currentStepIndex,
@@ -96,5 +103,66 @@ final class RecordingExecutor implements PipelineExecutor
     public function contextSnapshots(): array
     {
         return $this->contextSnapshots;
+    }
+
+    /**
+     * Check whether compensation was triggered during execution.
+     *
+     * @return bool True if at least one compensation job was executed.
+     */
+    public function compensationTriggered(): bool
+    {
+        return $this->compensationTriggered;
+    }
+
+    /**
+     * Get the ordered list of compensation job class names that were executed.
+     *
+     * @return array<int, string> Compensation classes in execution order (reverse of completed steps).
+     */
+    public function compensationSteps(): array
+    {
+        return $this->compensationSteps;
+    }
+
+    /**
+     * Run compensation jobs for completed steps in reverse order.
+     *
+     * Only compensates steps that completed AND have a compensation mapping
+     * defined in the manifest. Each compensation job is instantiated via the
+     * container, injected with the manifest, and called synchronously.
+     *
+     * @param PipelineManifest $manifest The pipeline manifest containing compensation mapping.
+     * @return void
+     */
+    private function runCompensation(PipelineManifest $manifest): void
+    {
+        if ($manifest->compensationMapping === []) {
+            return;
+        }
+
+        $reversedCompleted = array_reverse($manifest->completedSteps);
+
+        foreach ($reversedCompleted as $completedStep) {
+            if (! isset($manifest->compensationMapping[$completedStep])) {
+                continue;
+            }
+
+            $compensationClass = $manifest->compensationMapping[$completedStep];
+            $job = app()->make($compensationClass);
+
+            if (property_exists($job, 'pipelineManifest')) {
+                $property = new ReflectionProperty($job, 'pipelineManifest');
+                $property->setValue($job, $manifest);
+            }
+
+            app()->call([$job, 'handle']);
+
+            $this->compensationSteps[] = $compensationClass;
+        }
+
+        if ($this->compensationSteps !== []) {
+            $this->compensationTriggered = true;
+        }
     }
 }
