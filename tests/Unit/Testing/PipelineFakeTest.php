@@ -216,26 +216,3 @@ it('toListener() records pipeline and returns a no-op closure', function (): voi
     Pipeline::assertPipelineRan();
     expect(TrackExecutionJob::$executionOrder)->toBeEmpty();
 });
-
-// --- compensateWith() on FakePipelineBuilder ---
-
-it('compensateWith() returns FakePipelineBuilder for fluent chaining', function (): void {
-    Pipeline::fake();
-
-    $builder = Pipeline::make()->step(FakeJobA::class);
-    $result = $builder->compensateWith(FakeJobB::class);
-
-    expect($result)->toBe($builder);
-});
-
-it('compensateWith() sets compensation on the last step in the built definition', function (): void {
-    Pipeline::fake();
-
-    $builder = Pipeline::make()
-        ->step(FakeJobA::class)
-        ->compensateWith(FakeJobB::class);
-
-    $definition = $builder->build();
-
-    expect($definition->steps[0]->compensationJobClass)->toBe(FakeJobB::class);
-});

@@ -27,11 +27,6 @@ use Vherbaut\LaravelPipelineJobs\Testing\PipelineFake;
  * @method static void assertContext(\Closure $callback, int|null $pipelineIndex = null)
  * @method static \Vherbaut\LaravelPipelineJobs\Context\PipelineContext|null getRecordedContext(int|null $pipelineIndex = null)
  * @method static \Vherbaut\LaravelPipelineJobs\Context\PipelineContext|null getContextAfterStep(string $jobClass, int|null $pipelineIndex = null)
- * @method static void assertCompensationWasTriggered(int|null $pipelineIndex = null)
- * @method static void assertCompensationNotTriggered(int|null $pipelineIndex = null)
- * @method static void assertCompensationRan(string $jobClass, int|null $pipelineIndex = null)
- * @method static void assertCompensationNotRan(string $jobClass, int|null $pipelineIndex = null)
- * @method static void assertCompensationExecutedInOrder(array $expectedJobs, int|null $pipelineIndex = null)
  */
 class Pipeline extends Facade
 {

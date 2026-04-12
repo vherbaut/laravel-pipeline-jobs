@@ -31,8 +31,6 @@ final readonly class RecordedPipeline
      * @param array<int, string> $executedSteps Ordered list of fully qualified job class names that completed execution.
      * @param array<int, PipelineContext> $contextSnapshots Per-step context snapshots in execution order, each a deep clone captured after the step completed.
      * @param bool $wasRecording Whether this pipeline was executed in recording mode.
-     * @param bool $compensationTriggered Whether compensation was triggered during execution.
-     * @param array<int, string> $compensationSteps Ordered list of compensation class names that were executed.
      */
     public function __construct(
         public PipelineDefinition $definition,
@@ -40,7 +38,5 @@ final readonly class RecordedPipeline
         public array $executedSteps = [],
         public array $contextSnapshots = [],
         public bool $wasRecording = false,
-        public bool $compensationTriggered = false,
-        public array $compensationSteps = [],
     ) {}
 }
