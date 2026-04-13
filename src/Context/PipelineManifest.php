@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vherbaut\LaravelPipelineJobs\Context;
 
 use Illuminate\Support\Str;
+use Laravel\SerializableClosure\SerializableClosure;
 
 /**
  * Mutable DTO carrying the execution state of a pipeline run.
@@ -24,6 +25,7 @@ final class PipelineManifest
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
      * @param array<int, string> $stepClasses Ordered list of job class names.
      * @param array<string, string> $compensationMapping Map of step class name to compensation class name.
+     * @param array<int, array{closure: SerializableClosure, negated: bool}> $stepConditions Per-step condition entries keyed by step index.
      * @param int $currentStepIndex Index of the current step being executed.
      * @param array<int, string> $completedSteps List of completed step class names.
      * @param PipelineContext|null $context The user's pipeline context DTO.
@@ -35,6 +37,8 @@ final class PipelineManifest
         public readonly array $stepClasses,
         /** @var array<string, string> */
         public readonly array $compensationMapping,
+        /** @var array<int, array{closure: SerializableClosure, negated: bool}> */
+        public readonly array $stepConditions,
         public int $currentStepIndex,
         /** @var array<int, string> */
         public array $completedSteps,
@@ -48,6 +52,7 @@ final class PipelineManifest
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param array<string, string> $compensationMapping Map of step class name to compensation class name.
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
+     * @param array<int, array{closure: SerializableClosure, negated: bool}> $stepConditions Per-step condition entries keyed by step index.
      *
      * @return self
      */
@@ -56,12 +61,14 @@ final class PipelineManifest
         ?PipelineContext $context = null,
         array $compensationMapping = [],
         ?string $pipelineName = null,
+        array $stepConditions = [],
     ): self {
         return new self(
             pipelineId: (string) Str::uuid(),
             pipelineName: $pipelineName,
             stepClasses: $stepClasses,
             compensationMapping: $compensationMapping,
+            stepConditions: $stepConditions,
             currentStepIndex: 0,
             completedSteps: [],
             context: $context,

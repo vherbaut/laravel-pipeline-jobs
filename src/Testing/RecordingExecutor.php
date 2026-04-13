@@ -48,8 +48,14 @@ final class RecordingExecutor implements PipelineExecutor
      */
     public function execute(PipelineDefinition $definition, PipelineManifest $manifest): ?PipelineContext
     {
-        foreach ($manifest->stepClasses as $stepClass) {
+        foreach ($manifest->stepClasses as $stepIndex => $stepClass) {
             try {
+                if ($this->shouldSkipStep($manifest, $stepIndex)) {
+                    $manifest->advanceStep();
+
+                    continue;
+                }
+
                 $job = app()->make($stepClass);
 
                 if (property_exists($job, 'pipelineManifest')) {
@@ -80,6 +86,34 @@ final class RecordingExecutor implements PipelineExecutor
         }
 
         return $manifest->context;
+    }
+
+    /**
+     * Decide whether the step at the given index should be skipped based on its condition entry.
+     *
+     * Mirrors SyncExecutor::shouldSkipStep(). Must be called from within
+     * the execute() try block so a throwing closure propagates as
+     * StepExecutionFailed and triggers compensation, matching the
+     * production executor's behaviour.
+     *
+     * @param PipelineManifest $manifest The manifest carrying stepConditions and context.
+     * @param int $stepIndex The zero-based index of the step being evaluated.
+     *
+     * @return bool True when the step must be skipped, false when it should run.
+     */
+    private function shouldSkipStep(PipelineManifest $manifest, int $stepIndex): bool
+    {
+        $entry = $manifest->stepConditions[$stepIndex] ?? null;
+
+        if ($entry === null) {
+            return false;
+        }
+
+        $closure = $entry['closure']->getClosure();
+        $result = (bool) $closure($manifest->context);
+        $shouldRun = $entry['negated'] ? ! $result : $result;
+
+        return ! $shouldRun;
     }
 
     /**

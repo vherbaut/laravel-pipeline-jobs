@@ -6,9 +6,11 @@ use Illuminate\Support\Facades\Event;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
+use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderPlacedEvent;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderShippedEvent;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
@@ -157,4 +159,24 @@ it('registers independent pipelines for distinct event classes without cross-tal
 it('throws InvalidPipelineDefinition when Pipeline::listen() is called with an empty jobs array', function (): void {
     expect(fn () => Pipeline::listen(TestOrderPlacedEvent::class, []))
         ->toThrow(InvalidPipelineDefinition::class, 'A pipeline must contain at least one step.');
+});
+
+it('produces a void listener that ignores ->return()', function (): void {
+    $returnClosureCallCount = 0;
+    $resolvedContext = new SimpleContext;
+
+    $listener = (new PipelineBuilder([IncrementCountJob::class]))
+        ->send(fn ($event) => $resolvedContext)
+        ->return(function ($ctx) use (&$returnClosureCallCount): string {
+            $returnClosureCallCount++;
+
+            return 'should-not-be-returned';
+        })
+        ->toListener();
+
+    $listenerReturn = $listener(new stdClass);
+
+    expect($listenerReturn)->toBeNull()
+        ->and($returnClosureCallCount)->toBe(0)
+        ->and($resolvedContext->count)->toBe(1);
 });

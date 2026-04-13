@@ -7,12 +7,15 @@ namespace Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs;
 use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 
-final class IncrementCountJob
+final class SetActiveJob
 {
     use InteractsWithPipeline;
 
     /**
-     * Increment the injected SimpleContext's $count as a probe for test assertions.
+     * Flip the injected SimpleContext's $active flag to true and record execution order.
+     *
+     * Drives runtime-evaluation tests by mutating context mid-pipeline so
+     * that a later conditional step can observe the mutation.
      *
      * @return void
      */
@@ -21,7 +24,9 @@ final class IncrementCountJob
         $context = $this->pipelineContext();
 
         if ($context instanceof SimpleContext) {
-            $context->count++;
+            $context->active = true;
         }
+
+        TrackExecutionJob::$executionOrder[] = self::class;
     }
 }

@@ -7,9 +7,11 @@ use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderPlacedEvent;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobC;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
@@ -128,4 +130,56 @@ it('intercepts shouldBeQueued() without dispatching to queue', function (): void
 
     Pipeline::assertPipelineRan();
     expect(TrackExecutionJob::$executionOrder)->toBeEmpty();
+});
+
+// --- return() ---
+
+it('applies the return closure in recording mode and returns its result', function (): void {
+    Pipeline::fake()->recording();
+
+    $result = Pipeline::make([IncrementCountJob::class])
+        ->send(new SimpleContext)
+        ->return(fn ($ctx) => $ctx->count * 10)
+        ->run();
+
+    expect($result)->toBe(10);
+
+    Pipeline::assertStepExecuted(IncrementCountJob::class);
+    Pipeline::assertContextHas('count', 1);
+});
+
+it('returns null in fake mode even when ->return() is registered (no execution happened)', function (): void {
+    Pipeline::fake();
+
+    $result = Pipeline::make([IncrementCountJob::class])
+        ->send(new SimpleContext)
+        ->return(fn ($ctx) => $ctx->count * 99)
+        ->run();
+
+    expect($result)->toBeNull();
+
+    Pipeline::assertPipelineRan();
+    Pipeline::assertPipelineRanWith([IncrementCountJob::class]);
+});
+
+it('skips the return closure in recording mode when a step fails and returns null', function (): void {
+    Pipeline::fake()->recording();
+
+    $closureCallCount = 0;
+
+    $result = Pipeline::make([IncrementCountJob::class, FailingJob::class])
+        ->send(new SimpleContext)
+        ->return(function ($ctx) use (&$closureCallCount): int {
+            $closureCallCount++;
+
+            return $ctx instanceof SimpleContext ? $ctx->count * 10 : -1;
+        })
+        ->run();
+
+    // Parity with PipelineBuilder::run(): a step failure aborts before ->return() fires.
+    expect($result)->toBeNull()
+        ->and($closureCallCount)->toBe(0);
+
+    Pipeline::assertStepExecuted(IncrementCountJob::class);
+    Pipeline::assertStepNotExecuted(FailingJob::class);
 });

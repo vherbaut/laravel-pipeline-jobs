@@ -77,14 +77,24 @@ final class PipelineStepJob implements ShouldQueue
 
         $stepClass = $this->manifest->stepClasses[$stepIndex];
 
-        $job = app()->make($stepClass);
-
-        if (property_exists($job, 'pipelineManifest')) {
-            $property = new ReflectionProperty($job, 'pipelineManifest');
-            $property->setValue($job, $this->manifest);
-        }
-
         try {
+            if ($this->shouldSkip($stepIndex)) {
+                $this->manifest->advanceStep();
+
+                if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
+                    dispatch(new self($this->manifest));
+                }
+
+                return;
+            }
+
+            $job = app()->make($stepClass);
+
+            if (property_exists($job, 'pipelineManifest')) {
+                $property = new ReflectionProperty($job, 'pipelineManifest');
+                $property->setValue($job, $this->manifest);
+            }
+
             app()->call([$job, 'handle']);
         } catch (Throwable $exception) {
             Log::error('Pipeline step failed', [
@@ -103,5 +113,34 @@ final class PipelineStepJob implements ShouldQueue
         if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
             dispatch(new self($this->manifest));
         }
+    }
+
+    /**
+     * Decide whether the step at the given index should be skipped based on its condition entry.
+     *
+     * Mirrors SyncExecutor::shouldSkipStep(). Returns false when no
+     * condition is registered for the index; otherwise unwraps the
+     * SerializableClosure and applies the `negated` flag. Called from
+     * inside the surrounding try/catch so a throwing closure is logged
+     * via Log::error('Pipeline step failed', ...) and rethrown for
+     * Laravel's queue failure handling to fire.
+     *
+     * @param int $stepIndex The zero-based index of the step being evaluated.
+     *
+     * @return bool True when the step must be skipped, false when it should run.
+     */
+    private function shouldSkip(int $stepIndex): bool
+    {
+        $entry = $this->manifest->stepConditions[$stepIndex] ?? null;
+
+        if ($entry === null) {
+            return false;
+        }
+
+        $closure = $entry['closure']->getClosure();
+        $result = (bool) $closure($this->manifest->context);
+        $shouldRun = $entry['negated'] ? ! $result : $result;
+
+        return ! $shouldRun;
     }
 }
