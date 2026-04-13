@@ -7,15 +7,15 @@ namespace Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 
-final class ReadContextJob
+final class SetActiveJob
 {
-    /** @var string|null */
-    public static ?string $readName = null;
-
     protected ?PipelineManifest $pipelineManifest = null;
 
     /**
-     * Read the injected SimpleContext's $name into self::$readName for test observation.
+     * Flip the injected SimpleContext's $active flag to true and record execution order.
+     *
+     * Drives runtime-evaluation tests by mutating context mid-pipeline so
+     * that a later conditional step can observe the mutation.
      *
      * @return void
      */
@@ -24,7 +24,9 @@ final class ReadContextJob
         $context = $this->pipelineManifest?->context;
 
         if ($context instanceof SimpleContext) {
-            self::$readName = $context->name;
+            $context->active = true;
         }
+
+        TrackExecutionJob::$executionOrder[] = self::class;
     }
 }

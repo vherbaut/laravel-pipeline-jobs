@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vherbaut\LaravelPipelineJobs\Testing;
 
 use Closure;
+use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
@@ -29,8 +30,13 @@ final class FakePipelineBuilder
     /**
      * Create a new fake pipeline builder.
      *
+     * Widens the $jobs element type to `mixed` so the runtime guard in
+     * PipelineBuilder::__construct (throwing InvalidPipelineDefinition for
+     * entries that are neither string nor StepDefinition) stays reachable
+     * under PHPStan level 5, matching the PipelineBuilder constructor shape.
+     *
      * @param PipelineFake $fake The fake instance that records pipeline executions.
-     * @param array<int, string> $jobs Fully qualified job class names to add as steps.
+     * @param array<int, mixed> $jobs Job class names or pre-built step definitions to add as steps.
      */
     public function __construct(
         private readonly PipelineFake $fake,
@@ -48,6 +54,47 @@ final class FakePipelineBuilder
     public function step(string $jobClass): static
     {
         $this->builder->step($jobClass);
+
+        return $this;
+    }
+
+    /**
+     * Append a pre-built StepDefinition to the pipeline.
+     *
+     * @param StepDefinition $step The pre-built step to append.
+     * @return static
+     */
+    public function addStep(StepDefinition $step): static
+    {
+        $this->builder->addStep($step);
+
+        return $this;
+    }
+
+    /**
+     * Append a step that only runs when the condition evaluates to true.
+     *
+     * @param Closure(PipelineContext): bool $condition Predicate evaluated against the live PipelineContext.
+     * @param string $jobClass Fully qualified class name of the job to execute when the condition holds.
+     * @return static
+     */
+    public function when(Closure $condition, string $jobClass): static
+    {
+        $this->builder->when($condition, $jobClass);
+
+        return $this;
+    }
+
+    /**
+     * Append a step that runs unless the condition evaluates to true.
+     *
+     * @param Closure(PipelineContext): bool $condition Predicate evaluated against the live PipelineContext.
+     * @param string $jobClass Fully qualified class name of the job to execute when the condition is falsy.
+     * @return static
+     */
+    public function unless(Closure $condition, string $jobClass): static
+    {
+        $this->builder->unless($condition, $jobClass);
 
         return $this;
     }
@@ -181,10 +228,24 @@ final class FakePipelineBuilder
             $definition->steps,
         );
 
+        $stepConditions = [];
+
+        foreach ($definition->steps as $index => $step) {
+            if ($step->condition === null) {
+                continue;
+            }
+
+            $stepConditions[$index] = [
+                'closure' => new SerializableClosure($step->condition),
+                'negated' => $step->conditionNegated,
+            ];
+        }
+
         $manifest = PipelineManifest::create(
             stepClasses: $stepClasses,
             context: $resolvedContext,
             compensationMapping: $definition->compensationMapping(),
+            stepConditions: $stepConditions,
         );
 
         $executor = new RecordingExecutor;

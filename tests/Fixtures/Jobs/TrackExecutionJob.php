@@ -13,6 +13,11 @@ final class TrackExecutionJob
 
     protected ?PipelineManifest $pipelineManifest = null;
 
+    /**
+     * Append this class name to the shared execution-order log for test assertions.
+     *
+     * @return void
+     */
     public function handle(): void
     {
         self::$executionOrder[] = self::class;

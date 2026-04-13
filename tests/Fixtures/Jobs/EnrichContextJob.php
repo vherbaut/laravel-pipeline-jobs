@@ -11,6 +11,11 @@ final class EnrichContextJob
 {
     protected ?PipelineManifest $pipelineManifest = null;
 
+    /**
+     * Set the injected SimpleContext's $name to "enriched" as a probe for downstream steps.
+     *
+     * @return void
+     */
     public function handle(): void
     {
         $context = $this->pipelineManifest?->context;

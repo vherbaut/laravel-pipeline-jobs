@@ -12,6 +12,11 @@ final class ManifestObserverJob
 
     protected ?PipelineManifest $pipelineManifest = null;
 
+    /**
+     * Capture the injected PipelineManifest into self::$observedManifest for test inspection.
+     *
+     * @return void
+     */
     public function handle(): void
     {
         self::$observedManifest = $this->pipelineManifest;

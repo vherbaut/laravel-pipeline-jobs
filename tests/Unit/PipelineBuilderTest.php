@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-use Closure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
@@ -262,4 +262,75 @@ it('preserves all original StepDefinition properties when compensateWith() rebui
         ->and($step->backoff)->toBeNull()
         ->and($step->timeout)->toBeNull()
         ->and($step->sync)->toBeFalse();
+});
+
+// --- when() / unless() / addStep() / mixed array constructor ---
+
+it('appends a conditional step via fluent when() with conditionNegated=false', function () {
+    $condition = fn () => true;
+
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->when($condition, FakeJobB::class)
+        ->step(FakeJobC::class)
+        ->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[1]->condition)->toBe($condition)
+        ->and($definition->steps[1]->conditionNegated)->toBeFalse();
+});
+
+it('appends a conditional step via fluent unless() with conditionNegated=true', function () {
+    $condition = fn () => true;
+
+    $definition = (new PipelineBuilder)
+        ->unless($condition, FakeJobA::class)
+        ->build();
+
+    expect($definition->steps[0]->condition)->toBe($condition)
+        ->and($definition->steps[0]->conditionNegated)->toBeTrue();
+});
+
+it('returns the builder for fluent chaining from when() and unless()', function () {
+    $builder = new PipelineBuilder;
+
+    expect($builder->when(fn () => true, FakeJobA::class))->toBe($builder)
+        ->and($builder->unless(fn () => true, FakeJobB::class))->toBe($builder);
+});
+
+it('appends a pre-built StepDefinition via addStep()', function () {
+    $stepDefinition = Step::when(fn () => true, FakeJobA::class);
+
+    $definition = (new PipelineBuilder)
+        ->addStep($stepDefinition)
+        ->build();
+
+    expect($definition->steps)->toHaveCount(1)
+        ->and($definition->steps[0])->toBe($stepDefinition);
+});
+
+it('accepts a mixed array of strings and StepDefinition instances in the constructor', function () {
+    $condition = fn () => true;
+
+    $builder = new PipelineBuilder([
+        FakeJobA::class,
+        Step::when($condition, FakeJobB::class),
+        FakeJobC::class,
+    ]);
+
+    $definition = $builder->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class)
+        ->and($definition->steps[0]->condition)->toBeNull()
+        ->and($definition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[1]->condition)->toBe($condition)
+        ->and($definition->steps[1]->conditionNegated)->toBeFalse()
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobC::class);
+});
+
+it('rejects non-string non-StepDefinition items in the constructor array', function () {
+    expect(fn () => new PipelineBuilder([FakeJobA::class, 42, FakeJobC::class]))
+        ->toThrow(InvalidPipelineDefinition::class, 'must be class-string or StepDefinition');
 });

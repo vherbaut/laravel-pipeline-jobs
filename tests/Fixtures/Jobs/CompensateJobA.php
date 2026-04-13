@@ -13,6 +13,11 @@ final class CompensateJobA
 
     protected ?PipelineManifest $pipelineManifest = null;
 
+    /**
+     * Append this compensation class to the shared $executed log for test assertions.
+     *
+     * @return void
+     */
     public function handle(): void
     {
         self::$executed[] = self::class;

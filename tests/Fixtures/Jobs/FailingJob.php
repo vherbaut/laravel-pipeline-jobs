@@ -10,6 +10,13 @@ final class FailingJob
 {
     protected ?PipelineManifest $pipelineManifest = null;
 
+    /**
+     * Throw a RuntimeException to simulate a failing pipeline step.
+     *
+     * @return void
+     *
+     * @throws \RuntimeException Always, to exercise failure paths in tests.
+     */
     public function handle(): void
     {
         throw new \RuntimeException('Job failed intentionally');

@@ -142,3 +142,52 @@ it('compensation and context assertions work together (context state at failure 
     Pipeline::assertCompensationWasTriggered();
     Pipeline::assertCompensationRan(CompensateJobA::class);
 });
+
+// --- 11.7: Skipped conditional step does NOT trigger its compensation ---
+
+it('does not run compensation for a conditional step that was skipped', function (): void {
+    Pipeline::fake()->recording();
+
+    $context = new SimpleContext;
+    $context->active = false;
+
+    Pipeline::make()
+        ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
+        ->when(fn (SimpleContext $c) => $c->active, TrackExecutionJobB::class)
+        ->compensateWith(CompensateJobB::class)
+        ->step(FailingJob::class)->compensateWith(CompensateJobC::class)
+        ->send($context)
+        ->run();
+
+    Pipeline::assertStepExecuted(TrackExecutionJobA::class);
+    Pipeline::assertStepNotExecuted(TrackExecutionJobB::class);
+
+    Pipeline::assertCompensationWasTriggered();
+    Pipeline::assertCompensationRan(CompensateJobA::class);
+    Pipeline::assertCompensationNotRan(CompensateJobB::class);
+    Pipeline::assertCompensationNotRan(CompensateJobC::class);
+});
+
+// --- 11.8: Recording-mode step assertions reflect skipped conditional steps ---
+
+it('reflects skipped conditional steps via assertStepNotExecuted in recording mode', function (): void {
+    Pipeline::fake()->recording();
+
+    $context = new SimpleContext;
+    $context->active = false;
+
+    Pipeline::make()
+        ->step(TrackExecutionJobA::class)
+        ->when(fn (SimpleContext $c) => $c->active, TrackExecutionJobB::class)
+        ->step(TrackExecutionJobC::class)
+        ->send($context)
+        ->run();
+
+    Pipeline::assertStepExecuted(TrackExecutionJobA::class);
+    Pipeline::assertStepNotExecuted(TrackExecutionJobB::class);
+    Pipeline::assertStepExecuted(TrackExecutionJobC::class);
+    Pipeline::assertStepsExecutedInOrder([
+        TrackExecutionJobA::class,
+        TrackExecutionJobC::class,
+    ]);
+});
