@@ -27,6 +27,8 @@ final class PipelineBuilder
 
     private bool $shouldBeQueued = false;
 
+    private ?Closure $returnCallback = null;
+
     /**
      * Create a new pipeline builder.
      *
@@ -202,6 +204,29 @@ final class PipelineBuilder
     }
 
     /**
+     * Register a closure that transforms the final PipelineContext into the value returned by run().
+     *
+     * Behaviour:
+     * - Sync-only: the closure is applied exclusively in synchronous mode. Queued runs
+     *   (shouldBeQueued()) always return null and the closure is silently skipped.
+     * - Null context pass-through: when no context was sent, the closure is still invoked
+     *   with null as its sole argument. The caller is responsible for handling the null case.
+     * - Last-write-wins: calling return() multiple times silently overrides the previous
+     *   closure, matching the ergonomics of send() and shouldBeQueued().
+     * - Exceptions thrown by the closure propagate verbatim; they are NOT wrapped in
+     *   StepExecutionFailed because the closure is not a step.
+     *
+     * @param Closure(?PipelineContext): mixed $callback Closure applied to the final PipelineContext after sync execution.
+     * @return static
+     */
+    public function return(Closure $callback): static
+    {
+        $this->returnCallback = $callback;
+
+        return $this;
+    }
+
+    /**
      * Build an immutable PipelineDefinition from the accumulated steps.
      *
      * @return PipelineDefinition The immutable pipeline description ready for execution.
@@ -217,7 +242,7 @@ final class PipelineBuilder
     }
 
     /**
-     * Execute the pipeline and return the resulting context, or null when queued.
+     * Execute the pipeline and return a value derived from the final context.
      *
      * Builds the pipeline definition, resolves the context (calling the
      * closure if one was provided), creates a manifest, and delegates to
@@ -225,13 +250,13 @@ final class PipelineBuilder
      * shouldBeQueued() has been called. The queued path dispatches the
      * first step and returns null immediately.
      *
-     * @return PipelineContext|null The final pipeline context after sync execution, or null when queued or when no context was provided.
+     * @return mixed The return-closure result when ->return() was registered, the final PipelineContext (or null) otherwise. Always null in queued mode.
      *
      * @throws InvalidPipelineDefinition When no steps have been defined.
      * @throws StepExecutionFailed When any step throws an exception in sync mode.
      * @throws ContextSerializationFailed When the context contains a non-serializable property in queued mode.
      */
-    public function run(): ?PipelineContext
+    public function run(): mixed
     {
         $definition = $this->build();
 
@@ -252,10 +277,17 @@ final class PipelineBuilder
         );
 
         if ($definition->shouldBeQueued) {
+            // AC #4: queued mode always returns null; return() is sync-only.
             return (new QueuedExecutor)->execute($definition, $manifest);
         }
 
-        return (new SyncExecutor)->execute($definition, $manifest);
+        $finalContext = (new SyncExecutor)->execute($definition, $manifest);
+
+        if ($this->returnCallback !== null) {
+            return ($this->returnCallback)($finalContext);
+        }
+
+        return $finalContext;
     }
 
     /**

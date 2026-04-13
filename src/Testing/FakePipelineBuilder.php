@@ -27,6 +27,8 @@ final class FakePipelineBuilder
 {
     private PipelineBuilder $builder;
 
+    private ?Closure $returnCallback = null;
+
     /**
      * Create a new fake pipeline builder.
      *
@@ -143,6 +145,26 @@ final class FakePipelineBuilder
     }
 
     /**
+     * Register a closure that transforms the final PipelineContext into the value returned by run().
+     *
+     * Mirrors PipelineBuilder::return() with identical semantics (sync-only,
+     * null pass-through, last-write-wins, no exception wrapping) but applies
+     * only in recording mode. In Pipeline::fake() default (non-recording)
+     * mode, run() always returns null and the closure is silently skipped
+     * because no steps actually execute.
+     *
+     * @param Closure(?PipelineContext): mixed $callback Closure applied to the final PipelineContext in recording mode.
+     * @return static
+     */
+    public function return(Closure $callback): static
+    {
+        $this->returnCallback = $callback;
+        $this->builder->return($callback);
+
+        return $this;
+    }
+
+    /**
      * Build an immutable PipelineDefinition from the accumulated steps.
      *
      * @return PipelineDefinition The immutable pipeline description.
@@ -158,25 +180,43 @@ final class FakePipelineBuilder
      * Record the pipeline definition, optionally executing it in recording mode.
      *
      * In default fake mode, builds the PipelineDefinition, resolves the sent
-     * context, and stores both without executing any jobs.
+     * context, and stores both without executing any jobs. No return closure
+     * is invoked because no steps actually ran.
      *
      * In recording mode (Pipeline::fake()->recording()), executes the pipeline
      * synchronously via RecordingExecutor, capturing per-step context snapshots
-     * and the list of completed steps alongside the definition.
+     * and the list of completed steps alongside the definition. The registered
+     * return closure (if any) is applied to the final context and its result
+     * is returned, matching PipelineBuilder::run() semantics. When a step
+     * fails, compensation metadata is recorded and run() returns null; the
+     * return closure is NOT invoked, mirroring the real builder's contract
+     * (callbacks never see aborted runs).
      *
-     * @return PipelineContext|null The final context in recording mode, or null in fake mode.
+     * @return mixed The return-closure result when ->return() is registered AND recording mode completed successfully; the final PipelineContext (or null) in recording mode without a callback; always null in fake (non-recording) mode or when a step fails in recording mode.
      */
-    public function run(): ?PipelineContext
+    public function run(): mixed
     {
         $definition = $this->builder->build();
         $resolvedContext = $this->resolveContext();
 
         if ($this->fake->isRecording()) {
-            return $this->executeWithRecording($definition, $resolvedContext);
+            try {
+                $finalContext = $this->executeWithRecording($definition, $resolvedContext);
+            } catch (StepExecutionFailed) {
+                // Parity with PipelineBuilder::run(): step failure aborts before ->return() fires.
+                return null;
+            }
+
+            if ($this->returnCallback !== null) {
+                return ($this->returnCallback)($finalContext);
+            }
+
+            return $finalContext;
         }
 
         $this->fake->recordPipeline($definition, $resolvedContext);
 
+        // AC #9: fake mode always returns null; return() applies in recording mode only.
         return null;
     }
 
@@ -215,11 +255,16 @@ final class FakePipelineBuilder
      *
      * Creates a PipelineManifest, runs all steps synchronously, captures
      * per-step context snapshots and completed steps, then records
-     * everything in the PipelineFake.
+     * everything in the PipelineFake. Records compensation metadata when
+     * a step fails, then re-throws StepExecutionFailed to preserve parity
+     * with PipelineBuilder::run() so ->return() callbacks are not invoked
+     * against an aborted run.
      *
      * @param PipelineDefinition $definition The built pipeline definition.
      * @param PipelineContext|null $resolvedContext The resolved context to send.
-     * @return PipelineContext|null The final context after execution.
+     * @return PipelineContext|null The final context after successful execution.
+     *
+     * @throws StepExecutionFailed When any step fails; the failure is recorded first.
      */
     private function executeWithRecording(PipelineDefinition $definition, ?PipelineContext $resolvedContext): ?PipelineContext
     {
@@ -262,7 +307,7 @@ final class FakePipelineBuilder
             );
 
             return $finalContext;
-        } catch (StepExecutionFailed) {
+        } catch (StepExecutionFailed $e) {
             $this->fake->recordPipeline(
                 definition: $definition,
                 recordedContext: $manifest->context,
@@ -273,7 +318,7 @@ final class FakePipelineBuilder
                 compensationSteps: $executor->compensationSteps(),
             );
 
-            return null;
+            throw $e;
         }
     }
 

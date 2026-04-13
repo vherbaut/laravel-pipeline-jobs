@@ -9,6 +9,7 @@ use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
@@ -189,3 +190,79 @@ it('throws InvalidPipelineDefinition on empty builder', function (): void {
     expect(fn () => (new PipelineBuilder)->run())
         ->toThrow(InvalidPipelineDefinition::class, 'A pipeline must contain at least one step.');
 });
+
+// --- return() ---
+
+it('returns the closure result when ->return() is registered', function (Closure $builderFactory): void {
+    $result = $builderFactory()
+        ->send(new SimpleContext)
+        ->return(fn (?PipelineContext $ctx) => $ctx instanceof SimpleContext ? $ctx->count : null)
+        ->run();
+
+    expect($result)->toBe(1);
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        IncrementCountJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(IncrementCountJob::class),
+]);
+
+it('returns the PipelineContext when ->return() is not registered', function (Closure $builderFactory): void {
+    $result = $builderFactory()
+        ->send(new SimpleContext)
+        ->run();
+
+    expect($result)->toBeInstanceOf(SimpleContext::class)
+        ->and($result->count)->toBe(1);
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        IncrementCountJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(IncrementCountJob::class),
+]);
+
+it('passes null to the return closure when no context was sent', function (Closure $builderFactory): void {
+    $result = $builderFactory()
+        ->return(fn (?PipelineContext $ctx) => $ctx === null ? 'empty' : 'filled')
+        ->run();
+
+    expect($result)->toBe('empty');
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        TrackExecutionJobA::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class),
+]);
+
+it('propagates exceptions thrown by the return closure', function (Closure $builderFactory): void {
+    $builder = $builderFactory()
+        ->send(new SimpleContext)
+        ->return(fn () => throw new RuntimeException('boom'));
+
+    expect(fn () => $builder->run())->toThrow(RuntimeException::class, 'boom');
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        IncrementCountJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(IncrementCountJob::class),
+]);
+
+it('applies the most recent return closure when ->return() is called twice', function (Closure $builderFactory): void {
+    $result = $builderFactory()
+        ->send(new SimpleContext)
+        ->return(fn (?PipelineContext $ctx) => 'first')
+        ->return(fn (?PipelineContext $ctx) => $ctx instanceof SimpleContext ? $ctx->count * 10 : 'fallback')
+        ->run();
+
+    expect($result)->toBe(10);
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        IncrementCountJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(IncrementCountJob::class),
+]);

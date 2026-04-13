@@ -334,3 +334,34 @@ it('rejects non-string non-StepDefinition items in the constructor array', funct
     expect(fn () => new PipelineBuilder([FakeJobA::class, 42, FakeJobC::class]))
         ->toThrow(InvalidPipelineDefinition::class, 'must be class-string or StepDefinition');
 });
+
+// --- return() ---
+
+it('stores the return callback via return() and keeps fluent chain', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $result = $builder->return(fn () => 'x');
+
+    expect($result)->toBeInstanceOf(PipelineBuilder::class)
+        ->and($result)->toBe($builder);
+});
+
+it('overrides the return callback on multiple ->return() calls', function () {
+    $builder = (new PipelineBuilder([FakeJobA::class]))
+        ->return(fn () => 'first')
+        ->return(fn () => 'second');
+
+    $reflection = new ReflectionProperty(PipelineBuilder::class, 'returnCallback');
+    $stored = $reflection->getValue($builder);
+
+    expect($stored)->toBeInstanceOf(Closure::class)
+        ->and($stored(new PipelineContext))->toBe('second');
+});
+
+it('accepts a closure whose parameter is typed as ?PipelineContext', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $result = $builder->return(fn (?PipelineContext $ctx) => $ctx?->name ?? 'fallback');
+
+    expect($result)->toBe($builder);
+});

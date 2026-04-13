@@ -2,10 +2,12 @@
 
 declare(strict_types=1);
 
+use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
@@ -113,4 +115,29 @@ it('reflects the shouldBeQueued flag on the built PipelineDefinition', function 
 })->with([
     'array API' => fn () => new PipelineBuilder([TrackExecutionJobA::class]),
     'fluent API' => fn () => (new PipelineBuilder)->step(TrackExecutionJobA::class),
+]);
+
+it('returns null immediately even when ->return() is registered on a queued pipeline', function (Closure $builderFactory): void {
+    $closureCallCount = 0;
+
+    $result = $builderFactory()
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->return(function (?PipelineContext $ctx) use (&$closureCallCount): int {
+            $closureCallCount++;
+
+            return $ctx instanceof SimpleContext ? $ctx->count : -1;
+        })
+        ->run();
+
+    // AC #4: queued pipelines always return null; ->return() is sync-only and
+    // must not be silently evaluated against a partially-executed context.
+    expect($result)->toBeNull()
+        ->and($closureCallCount)->toBe(0);
+})->with([
+    'array API' => fn () => new PipelineBuilder([
+        IncrementCountJob::class,
+    ]),
+    'fluent API' => fn () => (new PipelineBuilder)
+        ->step(IncrementCountJob::class),
 ]);
