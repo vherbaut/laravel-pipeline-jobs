@@ -8,6 +8,7 @@ use Closure;
 use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
@@ -160,6 +161,37 @@ final class FakePipelineBuilder
     {
         $this->returnCallback = $callback;
         $this->builder->return($callback);
+
+        return $this;
+    }
+
+    /**
+     * Configure how the pipeline reacts when a step fails.
+     *
+     * Behaviour:
+     * - FailStrategy::StopAndCompensate: halts execution and runs compensation
+     *   jobs in reverse order (runtime wired in Story 5.2).
+     * - FailStrategy::SkipAndContinue: logs the failure, skips the failed step
+     *   and continues with the next step using the last successful context
+     *   (runtime wired in Story 5.3).
+     * - FailStrategy::StopImmediately: halts execution without running any
+     *   compensation. This is the default when onFailure() is never called
+     *   (preserves Epic 1 FR28 behavior).
+     *
+     * Last-write-wins: calling onFailure() multiple times silently overrides
+     * the previous strategy, matching the ergonomics of send(), shouldBeQueued(),
+     * and return().
+     *
+     * In both fake and recording modes of Pipeline::fake(), the strategy is
+     * stored on the recorded PipelineDefinition for later inspection in
+     * assertions.
+     *
+     * @param FailStrategy $strategy The strategy to apply when a step fails.
+     * @return static
+     */
+    public function onFailure(FailStrategy $strategy): static
+    {
+        $this->builder->onFailure($strategy);
 
         return $this;
     }

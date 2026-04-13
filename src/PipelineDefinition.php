@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vherbaut\LaravelPipelineJobs;
 
 use Closure;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 
 /**
@@ -28,6 +29,7 @@ final class PipelineDefinition
      * @param Closure|null $onComplete Closure to run when the pipeline completes (success or failure).
      * @param Closure|null $onSuccess Closure to run when the pipeline completes successfully.
      * @param Closure|null $onFailure Closure to run when the pipeline fails.
+     * @param FailStrategy $failStrategy Saga failure strategy driving executor behavior when a step fails. Consumed by SyncExecutor/QueuedExecutor/RecordingExecutor in Story 5.2.
      *
      * @throws InvalidPipelineDefinition When the steps array is empty.
      */
@@ -41,6 +43,7 @@ final class PipelineDefinition
         public readonly ?Closure $onComplete = null,
         public readonly ?Closure $onSuccess = null,
         public readonly ?Closure $onFailure = null,
+        public readonly FailStrategy $failStrategy = FailStrategy::StopImmediately,
     ) {
         if ($this->steps === []) {
             throw InvalidPipelineDefinition::emptySteps();

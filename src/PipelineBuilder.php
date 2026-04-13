@@ -8,6 +8,7 @@ use Closure;
 use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\ContextSerializationFailed;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
@@ -28,6 +29,8 @@ final class PipelineBuilder
     private bool $shouldBeQueued = false;
 
     private ?Closure $returnCallback = null;
+
+    private FailStrategy $failStrategy = FailStrategy::StopImmediately;
 
     /**
      * Create a new pipeline builder.
@@ -227,6 +230,33 @@ final class PipelineBuilder
     }
 
     /**
+     * Configure how the pipeline reacts when a step fails.
+     *
+     * Behaviour:
+     * - FailStrategy::StopAndCompensate: halts execution and runs compensation
+     *   jobs in reverse order (runtime wired in Story 5.2).
+     * - FailStrategy::SkipAndContinue: logs the failure, skips the failed step
+     *   and continues with the next step using the last successful context
+     *   (runtime wired in Story 5.3).
+     * - FailStrategy::StopImmediately: halts execution without running any
+     *   compensation. This is the default when onFailure() is never called
+     *   (preserves Epic 1 FR28 behavior).
+     *
+     * Last-write-wins: calling onFailure() multiple times silently overrides
+     * the previous strategy, matching the ergonomics of send(), shouldBeQueued(),
+     * and return().
+     *
+     * @param FailStrategy $strategy The strategy to apply when a step fails.
+     * @return static
+     */
+    public function onFailure(FailStrategy $strategy): static
+    {
+        $this->failStrategy = $strategy;
+
+        return $this;
+    }
+
+    /**
      * Build an immutable PipelineDefinition from the accumulated steps.
      *
      * @return PipelineDefinition The immutable pipeline description ready for execution.
@@ -238,6 +268,7 @@ final class PipelineBuilder
         return new PipelineDefinition(
             steps: $this->steps,
             shouldBeQueued: $this->shouldBeQueued,
+            failStrategy: $this->failStrategy,
         );
     }
 
