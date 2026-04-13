@@ -4,14 +4,14 @@ declare(strict_types=1);
 
 namespace Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs;
 
-use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
 
 final class CompensateJobC
 {
+    use InteractsWithPipeline;
+
     /** @var array<int, string> */
     public static array $executed = [];
-
-    protected ?PipelineManifest $pipelineManifest = null;
 
     /**
      * Append this compensation class to the shared $executed log for test assertions.

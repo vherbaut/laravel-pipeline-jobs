@@ -58,6 +58,10 @@ it('executes all queued steps in order on the sync driver', function (Closure $b
         ->step(TrackExecutionJobC::class),
 ]);
 
+// AC #5 canary: EnrichContextJob and ReadContextJob now both use the
+// InteractsWithPipeline trait, so this scenario also proves the trait
+// injection path survives the PipelineStepJob serialize/unserialize
+// round-trip on the sync queue driver.
 it('propagates context mutations between queued steps', function (Closure $builderFactory): void {
     $context = new SimpleContext;
     $context->name = 'original';

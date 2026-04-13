@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 namespace Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs;
 
-use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
 
 final class FailingJob
 {
-    protected ?PipelineManifest $pipelineManifest = null;
+    use InteractsWithPipeline;
 
     /**
      * Throw a RuntimeException to simulate a failing pipeline step.

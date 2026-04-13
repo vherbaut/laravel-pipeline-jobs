@@ -4,13 +4,14 @@ declare(strict_types=1);
 
 namespace Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs;
 
+use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 
 final class ManifestObserverJob
 {
-    public static ?PipelineManifest $observedManifest = null;
+    use InteractsWithPipeline;
 
-    protected ?PipelineManifest $pipelineManifest = null;
+    public static ?PipelineManifest $observedManifest = null;
 
     /**
      * Capture the injected PipelineManifest into self::$observedManifest for test inspection.
