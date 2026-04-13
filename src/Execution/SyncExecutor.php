@@ -36,8 +36,14 @@ final class SyncExecutor implements PipelineExecutor
      */
     public function execute(PipelineDefinition $definition, PipelineManifest $manifest): ?PipelineContext
     {
-        foreach ($manifest->stepClasses as $stepClass) {
+        foreach ($manifest->stepClasses as $stepIndex => $stepClass) {
             try {
+                if ($this->shouldSkipStep($manifest, $stepIndex)) {
+                    $manifest->advanceStep();
+
+                    continue;
+                }
+
                 $job = app()->make($stepClass);
 
                 if (property_exists($job, 'pipelineManifest')) {
@@ -60,5 +66,33 @@ final class SyncExecutor implements PipelineExecutor
         }
 
         return $manifest->context;
+    }
+
+    /**
+     * Decide whether the step at the given index should be skipped based on its condition entry.
+     *
+     * Returns false when no condition is registered for the index. Otherwise
+     * unwraps the SerializableClosure, evaluates it against the current
+     * context, and applies the `negated` flag. A throwing closure propagates
+     * so the surrounding catch block converts it to StepExecutionFailed.
+     *
+     * @param PipelineManifest $manifest The manifest carrying stepConditions and context.
+     * @param int $stepIndex The zero-based index of the step being evaluated.
+     *
+     * @return bool True when the step must be skipped, false when it should run.
+     */
+    private function shouldSkipStep(PipelineManifest $manifest, int $stepIndex): bool
+    {
+        $entry = $manifest->stepConditions[$stepIndex] ?? null;
+
+        if ($entry === null) {
+            return false;
+        }
+
+        $closure = $entry['closure']->getClosure();
+        $result = (bool) $closure($manifest->context);
+        $shouldRun = $entry['negated'] ? ! $result : $result;
+
+        return ! $shouldRun;
     }
 }

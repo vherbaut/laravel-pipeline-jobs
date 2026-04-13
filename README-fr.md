@@ -19,6 +19,9 @@ Ce package résout ces trois problèmes avec une API fluide et expressive qui s'
 - [Utilisation](#utilisation)
   - [Construire un pipeline simple](#construire-un-pipeline-simple)
   - [Transmettre des données entre les étapes](#transmettre-des-données-entre-les-étapes)
+  - [Jobs compatibles Pipeline](#jobs-compatibles-pipeline)
+  - [Extraire des valeurs de retour](#extraire-des-valeurs-de-retour)
+  - [Étapes conditionnelles](#étapes-conditionnelles)
   - [Pipelines en file d'attente](#pipelines-en-file-dattente)
   - [Pont vers les Event Listeners](#pont-vers-les-event-listeners)
   - [Pattern Saga (Compensation)](#pattern-saga-compensation)
@@ -92,18 +95,18 @@ class OrderContext extends PipelineContext
 }
 ```
 
-**2. Créer les étapes (jobs).** Chaque job reçoit le contexte via une propriété `pipelineManifest` :
+**2. Créer les étapes (jobs).** Ajoutez le trait `InteractsWithPipeline` et lisez le contexte via `pipelineContext()` :
 
 ```php
-use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
 
 class ChargeCustomer
 {
-    public PipelineManifest $pipelineManifest;
+    use InteractsWithPipeline;
 
     public function handle(PaymentService $payments): void
     {
-        $context = $this->pipelineManifest->context;
+        $context = $this->pipelineContext();
 
         $context->invoice = $payments->charge($context->order);
         $context->status = 'charged';
@@ -111,7 +114,7 @@ class ChargeCustomer
 }
 ```
 
-Remarquez que `PaymentService` est injecté via le conteneur Laravel, comme pour n'importe quel job classique. Le manifest (qui contient votre contexte) est injecté automatiquement par l'exécuteur du pipeline.
+Remarquez que `PaymentService` est injecté via le conteneur Laravel, comme pour n'importe quel job classique. L'exécuteur du pipeline injecte le contexte en direct sur le job automatiquement, via le trait. Si vous préférez une dépendance explicite, déclarez plutôt une propriété `public PipelineManifest $pipelineManifest;` à la place du trait. Les deux patterns sont pleinement supportés (voir la section [Jobs compatibles Pipeline](#jobs-compatibles-pipeline)).
 
 **3. Exécuter le pipeline :**
 
@@ -299,6 +302,179 @@ echo "Importé {$result->imported} lignes avec " . count($result->errors) . " er
 ```
 
 Chaque étape lit et écrit dans le même objet contexte. Le contexte est un objet PHP classique, votre IDE fournit donc l'autocomplétion et la vérification de types.
+
+### Jobs compatibles Pipeline
+
+Chaque étape d'un pipeline doit lire ou écrire dans le contexte partagé. Le package propose deux manières équivalentes de le faire, et vous pouvez les mélanger librement dans votre codebase.
+
+**1. Le trait `InteractsWithPipeline` (recommandé).** Ajoutez le trait à n'importe quel job et vous obtenez deux accesseurs gratuitement :
+
+```php
+use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
+
+class SendWelcomeEmail
+{
+    use InteractsWithPipeline;
+
+    public function handle(Mailer $mailer): void
+    {
+        $user = $this->pipelineContext()->user;
+
+        $mailer->send(new WelcomeMail($user));
+    }
+}
+```
+
+| Accesseur | Retour | Description |
+|-----------|--------|-------------|
+| `pipelineContext()` | `?PipelineContext` | Le contexte en direct quand le job s'exécute dans un pipeline, `null` sinon. |
+| `hasPipelineContext()` | `bool` | Indique si un contexte non null est actuellement disponible. |
+
+**2. Propriété explicite.** Si vous préférez une dépendance complètement visible (par exemple pour annoter un type contexte personnalisé), déclarez le manifest comme propriété publique :
+
+```php
+use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+
+class SendWelcomeEmail
+{
+    public PipelineManifest $pipelineManifest;
+
+    public function handle(Mailer $mailer): void
+    {
+        $user = $this->pipelineManifest->context->user;
+
+        $mailer->send(new WelcomeMail($user));
+    }
+}
+```
+
+Les deux patterns produisent un comportement identique à l'exécution. Le trait réduit le boilerplate, la propriété explicite est plus visible. Choisissez ce que votre équipe préfère.
+
+**Jobs en double mode.** Le trait brille quand vous voulez qu'un même job s'exécute à la fois en standalone (via `Bus::dispatch`) et dans un pipeline. Utilisez `hasPipelineContext()` pour brancher :
+
+```php
+use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
+
+class SyncProduct
+{
+    use InteractsWithPipeline;
+
+    public function __construct(
+        public readonly int $productId,
+    ) {}
+
+    public function handle(ProductSyncService $sync): void
+    {
+        if ($this->hasPipelineContext()) {
+            // Mode pipeline : récupérer le produit depuis le contexte partagé.
+            $sync->push($this->pipelineContext()->product);
+
+            return;
+        }
+
+        // Mode standalone : charger le produit depuis le stockage.
+        $sync->push(Product::findOrFail($this->productId));
+    }
+}
+```
+
+**Comment ça fonctionne en interne.** Les exécuteurs du pipeline (`SyncExecutor`, `PipelineStepJob`, `RecordingExecutor`) recherchent une propriété `pipelineManifest` sur chaque étape qu'ils exécutent, via `property_exists()` et `ReflectionProperty::setValue()`. Le trait déclare cette propriété pour vous. Quand un job s'exécute hors d'un pipeline, aucun exécuteur ne touche la propriété, elle reste donc à sa valeur `null` par défaut et les deux accesseurs retournent leurs valeurs "hors pipeline".
+
+### Extraire des valeurs de retour
+
+Par défaut, `->run()` retourne le `PipelineContext` complet après exécution synchrone. Quand vous ne vous intéressez qu'à un seul champ (un total, un identifiant de facture, un résultat calculé), la méthode `->return()` vous permet de déclarer une closure qui transforme le contexte final en la valeur que vous voulez réellement.
+
+```php
+$total = JobPipeline::make([
+    CreateOrder::class,
+    ApplyDiscount::class,
+    CalculateTotal::class,
+])
+    ->send(new OrderContext(items: $items))
+    ->return(fn (OrderContext $ctx) => $ctx->total)
+    ->run();
+
+// $total est le scalaire calculé par CalculateTotal. Plus besoin de déréférencer manuellement.
+```
+
+**Notes comportementales :**
+
+- **Mode synchrone uniquement.** La closure s'exécute exclusivement en mode synchrone. Les exécutions en queue retournent toujours `null` car l'exécution est reportée aux workers et la closure n'est jamais invoquée.
+- **Argument null.** Quand aucun contexte n'a été envoyé via `->send()`, la closure est quand même appelée avec `null` en argument. Votre closure est responsable de la gestion du cas null.
+- **Dernière écriture prioritaire.** Appeler `->return()` plusieurs fois écrase silencieusement la closure précédente. Seul le dernier enregistrement est appliqué.
+- **Les exceptions se propagent telles quelles.** Si votre closure lève une exception, l'exception remonte de `->run()` inchangée. Elle n'est PAS encapsulée dans `StepExecutionFailed` car la closure s'exécute après l'exécuteur, pas en tant qu'étape.
+
+**Sans `->return()` :**
+
+```php
+$context = JobPipeline::make([CreateOrder::class, CalculateTotal::class])
+    ->send(new OrderContext(items: $items))
+    ->run();
+
+return $context->total; // Déréférencement manuel, le type de retour s'élargit à ?PipelineContext
+```
+
+**Avec `->return()` :**
+
+```php
+return JobPipeline::make([CreateOrder::class, CalculateTotal::class])
+    ->send(new OrderContext(items: $items))
+    ->return(fn (OrderContext $ctx) => $ctx->total)
+    ->run();
+```
+
+### Étapes conditionnelles
+
+Certaines étapes ne doivent s'exécuter que dans des conditions spécifiques à l'exécution (un feature flag, une valeur de contexte définie par une étape antérieure, une préférence utilisateur). Le builder expose `when()` et `unless()` pour cela :
+
+```php
+JobPipeline::make()
+    ->step(ValidateOrder::class)
+    ->when(
+        fn (OrderContext $ctx) => $ctx->order->requiresApproval,
+        NotifyManager::class,
+    )
+    ->step(ChargeCustomer::class)
+    ->unless(
+        fn (OrderContext $ctx) => $ctx->order->isDigital,
+        ShipPackage::class,
+    )
+    ->send(new OrderContext(order: $order))
+    ->run();
+```
+
+- `when(Closure $condition, string $jobClass)` ajoute une étape qui ne s'exécute que si la closure retourne une valeur vraie.
+- `unless(Closure $condition, string $jobClass)` est l'inverse. L'étape ne s'exécute que si la closure retourne une valeur fausse.
+
+**Évaluation à l'exécution.** Les conditions sont évaluées contre le `PipelineContext` en direct, juste avant que l'étape ne s'exécute, en mode synchrone comme en mode queue. Les étapes précédentes peuvent muter le contexte et les conditions ultérieures voient l'état à jour :
+
+```php
+JobPipeline::make()
+    ->step(LoadOrder::class) // remplit $ctx->order
+    ->when(
+        fn (OrderContext $ctx) => $ctx->order->status === 'pending',
+        SendReminderEmail::class, // ne s'exécute que si la commande chargée est en attente
+    )
+    ->send(new OrderContext(orderId: $id))
+    ->run();
+```
+
+**Pipelines en queue.** Les closures de condition doivent être sérialisables car elles voyagent avec le manifest. Le builder les encapsule automatiquement dans `SerializableClosure`, donc toutes les variables capturées via `use` doivent aussi être sérialisables. Évitez de capturer des ressources, des classes anonymes ou des connexions DB actives dans une condition. Quand le prédicat dépend d'un état externe, chargez cet état dans une étape antérieure et lisez le depuis le contexte.
+
+**Composer avec la compensation.** Une étape conditionnelle peut également enregistrer un job de compensation :
+
+```php
+JobPipeline::make()
+    ->step(ReserveInventory::class)->compensateWith(ReleaseInventory::class)
+    ->when(
+        fn (OrderContext $ctx) => $ctx->order->total > 100,
+        ChargeCustomer::class,
+    )->compensateWith(RefundCustomer::class)
+    ->send(new OrderContext(order: $order))
+    ->run();
+```
+
+Si l'étape conditionnelle est sautée (la closure a retourné faux), sa compensation ne s'exécute jamais, même si une étape ultérieure échoue. La compensation ne s'applique qu'aux étapes qui se sont réellement exécutées.
 
 ### Pipelines en file d'attente
 
@@ -586,13 +762,23 @@ it('compense les étapes complétées en cas d\'échec', function () {
 | Méthode | Retour | Description |
 |---------|--------|-------------|
 | `step(string $jobClass)` | `static` | Ajouter une étape au pipeline. |
+| `when(Closure $condition, string $jobClass)` | `static` | Ajouter une étape qui ne s'exécute que si la condition (évaluée contre le contexte en direct) retourne une valeur vraie. La condition doit être sérialisable en mode queue. |
+| `unless(Closure $condition, string $jobClass)` | `static` | Ajouter une étape qui ne s'exécute que si la condition (évaluée contre le contexte en direct) retourne une valeur fausse. La condition doit être sérialisable en mode queue. |
 | `compensateWith(string $jobClass)` | `static` | Assigner un job de compensation à la dernière étape ajoutée. |
 | `send(PipelineContext\|Closure $context)` | `static` | Définir le contexte (instance ou closure pour résolution différée). |
 | `shouldBeQueued()` | `static` | Marquer le pipeline pour une exécution asynchrone en file d'attente. |
+| `return(Closure $callback)` | `static` | Enregistrer une closure qui transforme le contexte final en la valeur retournée par `run()`. Synchrone uniquement. Ignorée en mode queue. |
 | `build()` | `PipelineDefinition` | Construire une définition de pipeline immuable à partir de l'état actuel du builder. |
-| `run()` | `?PipelineContext` | Construire et exécuter le pipeline. Retourne le contexte final (sync) ou null (queued). |
+| `run()` | `mixed` | Construire et exécuter le pipeline. Retourne le résultat de la closure `->return()` quand enregistrée, sinon le `PipelineContext` final (ou `null`). Toujours `null` en mode queue. |
 | `toListener()` | `Closure` | Convertir le pipeline en closure d'event listener. |
 | `getContext()` | `PipelineContext\|Closure\|null` | Récupérer le contexte actuellement configuré. |
+
+### Trait `InteractsWithPipeline`
+
+| Méthode | Retour | Description |
+|---------|--------|-------------|
+| `pipelineContext()` | `?PipelineContext` | Le `PipelineContext` en direct quand le job s'exécute dans un pipeline avec un contexte, `null` sinon. |
+| `hasPipelineContext()` | `bool` | `true` quand un contexte non null est disponible, `false` pour un dispatch standalone ou un pipeline sans `->send(...)`. |
 
 ### `PipelineContext`
 
@@ -631,7 +817,6 @@ La facade `Pipeline` sert de proxy vers `JobPipeline` et ajoute la méthode `fak
 
 Les fonctionnalités suivantes sont prévues pour les prochaines versions. Les propriétés correspondantes sont déjà réservées dans le code :
 
-- **Étapes conditionnelles.** Sauter des étapes en fonction de l'état du contexte avec `when()` et `unless()`.
 - **Configuration de queue par étape.** Définir le nom de la queue, la connexion, le nombre de retries, le backoff et le timeout par étape.
 - **Hooks de cycle de vie du pipeline.** `beforeEach()`, `afterEach()`, `onStepFailed()`, `onSuccess()`, `onFailure()`, `onComplete()`.
 - **Pipelines nommés.** `name('order-fulfillment')` pour une meilleure observabilité et traçabilité.
