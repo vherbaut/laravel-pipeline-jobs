@@ -305,6 +305,7 @@ final class PipelineBuilder
             context: $resolvedContext,
             compensationMapping: $definition->compensationMapping(),
             stepConditions: $this->buildStepConditions($definition),
+            failStrategy: $definition->failStrategy,
         );
 
         if ($definition->shouldBeQueued) {
@@ -371,6 +372,7 @@ final class PipelineBuilder
                 context: $resolvedContext,
                 compensationMapping: $definition->compensationMapping(),
                 stepConditions: $stepConditions,
+                failStrategy: $definition->failStrategy,
             );
 
             if ($shouldBeQueued) {

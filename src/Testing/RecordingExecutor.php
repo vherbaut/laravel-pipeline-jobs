@@ -8,6 +8,8 @@ use ReflectionProperty;
 use Throwable;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Contracts\CompensableJob;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\PipelineExecutor;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
@@ -74,6 +76,10 @@ final class RecordingExecutor implements PipelineExecutor
                     $this->contextSnapshots[] = unserialize(serialize($manifest->context));
                 }
             } catch (Throwable $exception) {
+                $manifest->failureException = $exception;
+                $manifest->failedStepClass = $stepClass;
+                $manifest->failedStepIndex = $stepIndex;
+
                 $this->runCompensation($manifest);
 
                 throw StepExecutionFailed::forStep(
@@ -162,16 +168,24 @@ final class RecordingExecutor implements PipelineExecutor
     /**
      * Run compensation jobs for completed steps in reverse order.
      *
-     * Only compensates steps that completed AND have a compensation mapping
-     * defined in the manifest. Each compensation job is instantiated via the
-     * container, injected with the manifest, and called synchronously.
+     * Guarded on the manifest's failStrategy: only fires when strategy is
+     * FailStrategy::StopAndCompensate AND a compensation mapping exists.
+     * StopImmediately and SkipAndContinue both skip compensation entirely
+     * (SkipAndContinue step-level handling is deferred to Story 5.3).
      *
-     * @param PipelineManifest $manifest The pipeline manifest containing compensation mapping.
+     * Uses the CompensableJob-or-trait bridge: instances implementing
+     * CompensableJob receive a compensate($context) call; otherwise the
+     * legacy Story 3.3 pattern fires (reflection-injected manifest plus
+     * app()->call([$job, 'handle'])). Per-compensation failures are
+     * silently swallowed so the chain continues.
+     *
+     * @param PipelineManifest $manifest The pipeline manifest carrying completed steps, compensation mapping, context, and strategy.
+     *
      * @return void
      */
     private function runCompensation(PipelineManifest $manifest): void
     {
-        if ($manifest->compensationMapping === []) {
+        if ($manifest->compensationMapping === [] || $manifest->failStrategy !== FailStrategy::StopAndCompensate) {
             return;
         }
 
@@ -187,12 +201,16 @@ final class RecordingExecutor implements PipelineExecutor
             try {
                 $job = app()->make($compensationClass);
 
-                if (property_exists($job, 'pipelineManifest')) {
-                    $property = new ReflectionProperty($job, 'pipelineManifest');
-                    $property->setValue($job, $manifest);
-                }
+                if ($job instanceof CompensableJob) {
+                    $job->compensate($manifest->context);
+                } else {
+                    if (property_exists($job, 'pipelineManifest')) {
+                        $property = new ReflectionProperty($job, 'pipelineManifest');
+                        $property->setValue($job, $manifest);
+                    }
 
-                app()->call([$job, 'handle']);
+                    app()->call([$job, 'handle']);
+                }
 
                 $this->compensationSteps[] = $compensationClass;
             } catch (Throwable) {

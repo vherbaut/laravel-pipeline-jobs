@@ -8,6 +8,8 @@ use ReflectionProperty;
 use Throwable;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Contracts\CompensableJob;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 
@@ -26,7 +28,10 @@ final class SyncExecutor implements PipelineExecutor
      *
      * Iterates through each step in order, instantiating the job via the
      * container, injecting the manifest, and calling handle() with DI
-     * resolution. Stops on first failure and wraps the exception.
+     * resolution. Stops on first failure and wraps the exception. When the
+     * manifest's failStrategy is StopAndCompensate, the compensation jobs
+     * for every completed step are invoked in reverse order before the
+     * wrapped StepExecutionFailed is rethrown.
      *
      * @param PipelineDefinition $definition The immutable pipeline description containing steps and configuration.
      * @param PipelineManifest $manifest The mutable execution state carrying context and step progress.
@@ -56,6 +61,14 @@ final class SyncExecutor implements PipelineExecutor
                 $manifest->markStepCompleted($stepClass);
                 $manifest->advanceStep();
             } catch (Throwable $exception) {
+                $manifest->failureException = $exception;
+                $manifest->failedStepClass = $stepClass;
+                $manifest->failedStepIndex = $stepIndex;
+
+                if ($manifest->failStrategy === FailStrategy::StopAndCompensate) {
+                    $this->runCompensationChain($manifest);
+                }
+
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,
                     $manifest->currentStepIndex,
@@ -94,5 +107,62 @@ final class SyncExecutor implements PipelineExecutor
         $shouldRun = $entry['negated'] ? ! $result : $result;
 
         return ! $shouldRun;
+    }
+
+    /**
+     * Run compensation jobs for every completed step in reverse order.
+     *
+     * Only invoked when $manifest->failStrategy === FailStrategy::StopAndCompensate.
+     * Reads the ordered list of completed steps from $manifest->completedSteps,
+     * reverses it, and for each completed step whose class has a compensation
+     * mapping in $manifest->compensationMapping, resolves the compensation via
+     * the container and invokes it through the CompensableJob-or-trait bridge:
+     *
+     * - If the compensation implements CompensableJob, calls compensate($context).
+     * - Otherwise, injects the manifest into a pipelineManifest property when
+     *   present, then calls handle() via the container (Story 3.3 pattern).
+     *
+     * Compensation is best-effort: a throwable from one compensation is silently
+     * swallowed so the chain continues with the next entry. Logging and event
+     * emission on compensation failure are deferred to Story 5.3 (NFR6).
+     *
+     * @param PipelineManifest $manifest The manifest carrying completedSteps, compensationMapping, and context.
+     *
+     * @return void
+     */
+    private function runCompensationChain(PipelineManifest $manifest): void
+    {
+        if ($manifest->compensationMapping === []) {
+            return;
+        }
+
+        $reversedCompleted = array_reverse($manifest->completedSteps);
+
+        foreach ($reversedCompleted as $completedStep) {
+            if (! isset($manifest->compensationMapping[$completedStep])) {
+                continue;
+            }
+
+            $compensationClass = $manifest->compensationMapping[$completedStep];
+
+            try {
+                $job = app()->make($compensationClass);
+
+                if ($job instanceof CompensableJob) {
+                    $job->compensate($manifest->context);
+
+                    continue;
+                }
+
+                if (property_exists($job, 'pipelineManifest')) {
+                    $property = new ReflectionProperty($job, 'pipelineManifest');
+                    $property->setValue($job, $manifest);
+                }
+
+                app()->call([$job, 'handle']);
+            } catch (Throwable) {
+                // Best-effort: compensation failures do not abort the chain.
+            }
+        }
     }
 }

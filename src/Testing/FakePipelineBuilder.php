@@ -323,6 +323,7 @@ final class FakePipelineBuilder
             context: $resolvedContext,
             compensationMapping: $definition->compensationMapping(),
             stepConditions: $stepConditions,
+            failStrategy: $definition->failStrategy,
         );
 
         $executor = new RecordingExecutor;

@@ -9,10 +9,12 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Log;
 use ReflectionProperty;
 use Throwable;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 
 /**
  * Internal queued wrapper that executes a single pipeline step and chains the next.
@@ -24,6 +26,11 @@ use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
  * next PipelineStepJob until the pipeline is complete. Failures are logged
  * with pipeline context and rethrown so Laravel's native queue failure
  * handling (failed_jobs, retry, failed()) fires for the wrapper job.
+ *
+ * When the manifest's failStrategy is StopAndCompensate, the wrapper job
+ * also dispatches a Bus::chain() of CompensationStepJob instances in
+ * reverse order of the completed steps before rethrowing, so each
+ * compensation runs on a fresh worker with standard Laravel retry.
  *
  * @internal
  */
@@ -60,9 +67,10 @@ final class PipelineStepJob implements ShouldQueue
      * injects the manifest into the step via ReflectionProperty when the
      * target job exposes a pipelineManifest property, and invokes handle()
      * through the container. On success, advances the manifest and dispatches
-     * the next PipelineStepJob. On failure, logs pipeline context and
-     * rethrows so Laravel marks this wrapper job as failed and stops the
-     * chain.
+     * the next PipelineStepJob. On failure, records failure-context on the
+     * manifest, dispatches the reversed compensation chain when the strategy
+     * is StopAndCompensate, logs pipeline context, and rethrows so Laravel
+     * marks this wrapper job as failed and stops the chain.
      *
      * @return void
      * @throws Throwable When the underlying step throws; rethrown after logging.
@@ -97,6 +105,14 @@ final class PipelineStepJob implements ShouldQueue
 
             app()->call([$job, 'handle']);
         } catch (Throwable $exception) {
+            $this->manifest->failureException = $exception;
+            $this->manifest->failedStepClass = $stepClass;
+            $this->manifest->failedStepIndex = $stepIndex;
+
+            if ($this->manifest->failStrategy === FailStrategy::StopAndCompensate) {
+                $this->dispatchCompensationChain();
+            }
+
             Log::error('Pipeline step failed', [
                 'pipelineId' => $this->manifest->pipelineId,
                 'currentStepIndex' => $stepIndex,
@@ -142,5 +158,65 @@ final class PipelineStepJob implements ShouldQueue
         $shouldRun = $entry['negated'] ? ! $result : $result;
 
         return ! $shouldRun;
+    }
+
+    /**
+     * Dispatch the reversed compensation chain as a Bus::chain of CompensationStepJob.
+     *
+     * Reverses $this->manifest->completedSteps, looks up the compensation
+     * class for each completed step in $this->manifest->compensationMapping,
+     * and accumulates a CompensationStepJob wrapper per mapped entry. When
+     * the resulting array is non-empty, dispatches Bus::chain($jobs) so each
+     * compensation runs on its own worker in reverse order. Short-circuits
+     * to no dispatch when no completed step declared a compensation.
+     *
+     * Called from the failure branch of handle() only when the manifest's
+     * failStrategy is FailStrategy::StopAndCompensate.
+     *
+     * @return void
+     */
+    private function dispatchCompensationChain(): void
+    {
+        if ($this->manifest->compensationMapping === []) {
+            return;
+        }
+
+        $chain = [];
+        $reversedCompleted = array_reverse($this->manifest->completedSteps);
+
+        foreach ($reversedCompleted as $completedStep) {
+            if (! isset($this->manifest->compensationMapping[$completedStep])) {
+                continue;
+            }
+
+            $chain[] = new CompensationStepJob(
+                $this->manifest->compensationMapping[$completedStep],
+                $this->manifest,
+            );
+        }
+
+        if ($chain === []) {
+            return;
+        }
+
+        // NFR19: clear the non-serializable throwable from the manifest BEFORE
+        // Bus::chain() serializes each CompensationStepJob's payload. The
+        // wrapped jobs share the same manifest reference, so nulling here
+        // protects every queued compensation payload.
+        $this->manifest->failureException = null;
+
+        try {
+            Bus::chain($chain)->dispatch();
+        } catch (Throwable $dispatchException) {
+            // A failure to dispatch the compensation chain (queue driver
+            // unavailable, serialization failure) must not mask the original
+            // step exception. Log the dispatch failure and let handle()
+            // rethrow the real step exception caught upstream.
+            Log::error('Pipeline compensation chain dispatch failed', [
+                'pipelineId' => $this->manifest->pipelineId,
+                'failedStepClass' => $this->manifest->failedStepClass,
+                'exception' => $dispatchException->getMessage(),
+            ]);
+        }
     }
 }
