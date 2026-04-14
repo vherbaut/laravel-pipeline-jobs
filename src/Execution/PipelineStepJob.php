@@ -17,6 +17,7 @@ use Throwable;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
 /**
@@ -95,8 +96,21 @@ final class PipelineStepJob implements ShouldQueue
      * - onStepFailed: fires inside the catch block after failure-field
      *   recording on the manifest and BEFORE FailStrategy branching.
      *
-     * Hook closures survive queue transport via SerializableClosure
-     * (mirrors the stepConditions pattern).
+     * Pipeline-level lifecycle callbacks (Story 6.2) fire on the terminal
+     * wrapper only:
+     *
+     * - On the last wrapper's successful completion (currentStepIndex has
+     *   advanced past the last step), onSuccess fires first, then onComplete.
+     *   Under SkipAndContinue the pipeline reaches this tail regardless of
+     *   intermediate skipped steps (AC #10).
+     * - On a failing wrapper under StopImmediately / StopAndCompensate,
+     *   onFailure fires AFTER onStepFailed, AFTER the compensation chain is
+     *   DISPATCHED (queued compensation jobs execute on their own workers
+     *   LATER), and BEFORE the terminal rethrow. Callback throws mark the
+     *   wrapper failed in Laravel's queue with the callback exception.
+     *
+     * Hook and callback closures survive queue transport via
+     * SerializableClosure (mirrors the stepConditions pattern).
      *
      * @return void
      * @throws Throwable When the underlying step throws under StopImmediately or StopAndCompensate.
@@ -117,7 +131,16 @@ final class PipelineStepJob implements ShouldQueue
 
                 if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
                     dispatch(new self($this->manifest));
+
+                    return;
                 }
+
+                // Story 6.2 AC #1 / AC #10: a conditionally-skipped last step
+                // still terminates the pipeline on this wrapper. Fire the
+                // terminal callbacks so queued-mode parity with SyncExecutor
+                // is preserved when the last step is skipped by when()/unless().
+                $this->firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
+                $this->firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
 
                 return;
             }
@@ -196,7 +219,17 @@ final class PipelineStepJob implements ShouldQueue
 
                         throw $dispatchException;
                     }
+
+                    return;
                 }
+
+                // Story 6.2 AC #1 / AC #10: SkipAndContinue on the last step
+                // still terminates the pipeline on this wrapper with a
+                // "success" outcome (the strategy converts intermediate
+                // failures into continuations). Fire terminal callbacks so
+                // queued-mode parity with SyncExecutor is preserved.
+                $this->firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
+                $this->firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
 
                 return;
             }
@@ -211,6 +244,49 @@ final class PipelineStepJob implements ShouldQueue
                 'stepClass' => $stepClass,
                 'exception' => $exception->getMessage(),
             ]);
+
+            // Story 6.2 AC #2, #7, #11: pipeline-level onFailure fires AFTER
+            // per-step onStepFailed (Story 6.1 fireHooks above), AFTER
+            // compensation dispatch (queued — the Bus::chain is dispatched;
+            // compensation jobs run on their own workers later), AFTER the
+            // standard Log::error emission, and BEFORE the wrapper rethrow.
+            // Under SkipAndContinue this branch is unreachable (AC #10).
+            try {
+                $this->firePipelineCallback(
+                    $this->manifest->onFailureCallback,
+                    $this->manifest->context,
+                    $exception,
+                );
+            } catch (Throwable $callbackException) {
+                // AC #5 queued parity: wrap the callback exception in
+                // StepExecutionFailed so failed_jobs carries the same
+                // envelope as SyncExecutor / RecordingExecutor. The
+                // original step exception is preserved on
+                // StepExecutionFailed::$originalStepException.
+                throw StepExecutionFailed::forCallbackFailure(
+                    $this->manifest->pipelineId,
+                    $this->manifest->currentStepIndex,
+                    $stepClass,
+                    $callbackException,
+                    $exception,
+                );
+            }
+
+            try {
+                $this->firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+            } catch (Throwable $callbackException) {
+                // AC #12 queued: a throwing onComplete replaces the
+                // originally-intended rethrow; wrap uniformly so
+                // failed_jobs carries the StepExecutionFailed envelope
+                // with originalStepException preserved.
+                throw StepExecutionFailed::forCallbackFailure(
+                    $this->manifest->pipelineId,
+                    $this->manifest->currentStepIndex,
+                    $stepClass,
+                    $callbackException,
+                    $exception,
+                );
+            }
 
             throw $exception;
         }
@@ -228,7 +304,16 @@ final class PipelineStepJob implements ShouldQueue
 
         if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
             dispatch(new self($this->manifest));
+
+            return;
         }
+
+        // Story 6.2 AC #1, #7: pipeline terminates on this wrapper (last step
+        // completed). onSuccess fires first, then onComplete. Callback throws
+        // mark the wrapper failed in Laravel's queue (acceptable per AC #12
+        // queued-mode clause).
+        $this->firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
+        $this->firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
     }
 
     /**
@@ -291,6 +376,43 @@ final class PipelineStepJob implements ShouldQueue
 
             $closure($step, $context, $exception);
         }
+    }
+
+    /**
+     * Invoke a pipeline-level callback with the appropriate argument set.
+     *
+     * Mirrors SyncExecutor::firePipelineCallback() and
+     * RecordingExecutor::firePipelineCallback() per Story 5.2 Design
+     * Decision #2 (three-site duplication over shared helper). Null-guards
+     * on the callback slot (zero-overhead fast path, AC #6); unwraps via
+     * getClosure() and invokes with ($context) for onSuccess/onComplete
+     * or ($context, $exception) for onFailure. A throw from the closure
+     * propagates unchanged (architecture.md:395); the caller handles the
+     * queued-wrapper failure semantics (AC #12).
+     *
+     * @param SerializableClosure|null $callback The wrapped pipeline-level callback, or null when not registered.
+     * @param PipelineContext|null $context The live pipeline context at firing time (may be null).
+     * @param Throwable|null $exception The caught throwable for onFailure; null for onSuccess/onComplete.
+     * @return void
+     */
+    private function firePipelineCallback(
+        ?SerializableClosure $callback,
+        ?PipelineContext $context,
+        ?Throwable $exception = null,
+    ): void {
+        if ($callback === null) {
+            return;
+        }
+
+        $closure = $callback->getClosure();
+
+        if ($exception === null) {
+            $closure($context);
+
+            return;
+        }
+
+        $closure($context, $exception);
     }
 
     /**

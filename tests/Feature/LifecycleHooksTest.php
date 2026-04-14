@@ -12,6 +12,7 @@ use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\HookRecorder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobB;
@@ -19,6 +20,7 @@ use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobB;
 beforeEach(function (): void {
     TrackExecutionJob::$executionOrder = [];
     CompensateJobA::$executed = [];
+    HookRecorder::reset();
 });
 
 it('fires beforeEach before each step in a sync pipeline', function (): void {
@@ -334,4 +336,193 @@ it('aborts subsequent onStepFailed hooks when one throws', function (): void {
 
     expect($run)->toThrow(StepExecutionFailed::class);
     expect($secondHookCalls)->toBe(0); // Second hook must not fire.
+});
+
+// --- Story 6.2: Pipeline-level callbacks (sync mode) ---
+
+it('pipeline-level: fires onSuccess once on sync pipeline success', function (): void {
+    (new PipelineBuilder([TrackExecutionJobA::class, TrackExecutionJobB::class]))
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(HookRecorder::$fired)->toBe(['onSuccess']);
+});
+
+it('pipeline-level: fires onComplete after onSuccess on success', function (): void {
+    (new PipelineBuilder([TrackExecutionJobA::class]))
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
+});
+
+it('pipeline-level: fires onFailure and onComplete on StopImmediately failure', function (): void {
+    $run = fn () => (new PipelineBuilder([TrackExecutionJobA::class, FailingJob::class]))
+        ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+            HookRecorder::$fired[] = 'onFailure';
+            HookRecorder::$capturedException = $e;
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect($run)->toThrow(StepExecutionFailed::class);
+
+    expect(HookRecorder::$fired)->toBe(['onFailure', 'onComplete'])
+        ->and(HookRecorder::$capturedException)->toBeInstanceOf(RuntimeException::class)
+        ->and(HookRecorder::$capturedException->getMessage())->toBe('Job failed intentionally');
+});
+
+it('pipeline-level: fires onFailure after compensation under StopAndCompensate', function (): void {
+    CompensateJobA::$onHandle = function (): void {
+        HookRecorder::$fired[] = 'compensate';
+    };
+
+    try {
+        (new PipelineBuilder)
+            ->step(TrackExecutionJobA::class)
+            ->compensateWith(CompensateJobA::class)
+            ->step(FailingJob::class)
+            ->onFailure(FailStrategy::StopAndCompensate)
+            ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+                HookRecorder::$fired[] = 'onFailure';
+            })
+            ->send(new SimpleContext)
+            ->run();
+        fail('Expected StepExecutionFailed to be thrown');
+    } catch (StepExecutionFailed) {
+        // Expected.
+    } finally {
+        CompensateJobA::$onHandle = null;
+    }
+
+    // AC #11: compensation runs BEFORE pipeline-level onFailure under sync mode.
+    expect(HookRecorder::$fired)->toBe(['compensate', 'onFailure']);
+});
+
+it('pipeline-level: does NOT fire onFailure under SkipAndContinue', function (): void {
+    (new PipelineBuilder([TrackExecutionJobA::class, FailingJob::class, TrackExecutionJobB::class]))
+        ->onFailure(FailStrategy::SkipAndContinue)
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+            HookRecorder::$fired[] = 'onFailure';
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
+});
+
+it('pipeline-level: does NOT fire pipeline-level callbacks when none are registered', function (): void {
+    // Zero-overhead fast path (AC #6, FR37, NFR2). Assertion is the absence
+    // of side effects plus the existing test suite remaining green. This
+    // test proves that the null-guard branch in firePipelineCallback()
+    // executes without touching the HookRecorder.
+    (new PipelineBuilder([TrackExecutionJobA::class, TrackExecutionJobB::class]))
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(HookRecorder::$fired)->toBe([]);
+});
+
+it('pipeline-level: preserves onStepFailed firing before pipeline onFailure under StopImmediately', function (): void {
+    $run = fn () => (new PipelineBuilder([FailingJob::class]))
+        ->onStepFailed(function (StepDefinition $step, ?PipelineContext $ctx, Throwable $e): void {
+            HookRecorder::$fired[] = 'onStepFailed';
+        })
+        ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+            HookRecorder::$fired[] = 'onFailure';
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect($run)->toThrow(StepExecutionFailed::class);
+
+    // AC #2: onStepFailed fires BEFORE pipeline-level onFailure.
+    expect(HookRecorder::$fired)->toBe(['onStepFailed', 'onFailure']);
+});
+
+it('pipeline-level: onSuccess throw propagates unwrapped and skips onComplete', function (): void {
+    $run = fn () => (new PipelineBuilder([TrackExecutionJobA::class]))
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            throw new RuntimeException('onSuccess-boom');
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    try {
+        $run();
+        fail('Expected RuntimeException to be thrown');
+    } catch (RuntimeException $e) {
+        expect($e->getMessage())->toBe('onSuccess-boom');
+    }
+
+    expect(HookRecorder::$fired)->toBe([]);
+});
+
+it('pipeline-level: onFailure throw wraps as StepExecutionFailed with callback as previous and original step exception preserved', function (): void {
+    try {
+        (new PipelineBuilder([FailingJob::class]))
+            ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+                throw new LogicException('onFailure-boom');
+            })
+            ->onComplete(function (?PipelineContext $ctx): void {
+                HookRecorder::$fired[] = 'onComplete';
+            })
+            ->send(new SimpleContext)
+            ->run();
+        fail('Expected StepExecutionFailed to be thrown');
+    } catch (StepExecutionFailed $e) {
+        expect($e->getPrevious())->toBeInstanceOf(LogicException::class)
+            ->and($e->getPrevious()->getMessage())->toBe('onFailure-boom')
+            ->and($e->originalStepException)->toBeInstanceOf(RuntimeException::class)
+            ->and($e->originalStepException->getMessage())->toBe('Job failed intentionally');
+    }
+
+    // AC #12: onComplete is NOT called when onFailure throws.
+    expect(HookRecorder::$fired)->toBe([]);
+});
+
+it('pipeline-level: onComplete-after-onFailure throw wraps as StepExecutionFailed and preserves the original step exception', function (): void {
+    try {
+        (new PipelineBuilder([FailingJob::class]))
+            ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+                HookRecorder::$fired[] = 'onFailure';
+            })
+            ->onComplete(function (?PipelineContext $ctx): void {
+                throw new LogicException('onComplete-boom');
+            })
+            ->send(new SimpleContext)
+            ->run();
+        fail('Expected StepExecutionFailed to be thrown');
+    } catch (StepExecutionFailed $e) {
+        expect($e->getPrevious())->toBeInstanceOf(LogicException::class)
+            ->and($e->getPrevious()->getMessage())->toBe('onComplete-boom')
+            ->and($e->originalStepException)->toBeInstanceOf(RuntimeException::class)
+            ->and($e->originalStepException->getMessage())->toBe('Job failed intentionally');
+    }
+
+    // AC #12 failure path: onFailure succeeded, onComplete's throw replaces the
+    // intended StepExecutionFailed rethrow via forCallbackFailure so the
+    // original step exception stays observable on $originalStepException.
+    expect(HookRecorder::$fired)->toBe(['onFailure']);
 });

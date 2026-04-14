@@ -85,6 +85,63 @@ final class PipelineManifest
     public array $onStepFailedHooks = [];
 
     /**
+     * Pipeline-level onSuccess callback (wrapped in SerializableClosure for queue transport).
+     *
+     * Populated by PipelineBuilder::run() / PipelineBuilder::toListener() /
+     * FakePipelineBuilder::executeWithRecording() after the manifest is
+     * created; defaults to null when the pipeline registers no onSuccess
+     * callback. Executors unwrap via $this->onSuccessCallback?->getClosure()
+     * at firing time. Fires once on the success tail BEFORE onComplete.
+     *
+     * Semantic: "the pipeline reached the success tail", NOT "every step
+     * succeeded". Under FailStrategy::SkipAndContinue intermediate step
+     * failures are converted into continuations, so this callback still
+     * fires when the pipeline completes with one or more skip-recovered
+     * steps. Users needing per-step failure observability should register
+     * onStepFailed per-step hooks (Story 6.1).
+     *
+     * @var SerializableClosure|null
+     */
+    public ?SerializableClosure $onSuccessCallback = null;
+
+    /**
+     * Pipeline-level onFailure callback (wrapped in SerializableClosure for queue transport).
+     *
+     * Populated by PipelineBuilder::run() / PipelineBuilder::toListener() /
+     * FakePipelineBuilder::executeWithRecording() after the manifest is
+     * created; defaults to null when the pipeline registers no onFailure
+     * Closure callback (distinct from the FailStrategy enum carried on
+     * $failStrategy). Fires inside the catch block AFTER per-step
+     * onStepFailed hooks (Story 6.1) AND AFTER compensation AND BEFORE
+     * the terminal rethrow. Does NOT fire under FailStrategy::SkipAndContinue.
+     *
+     * Per-mode ordering nuance for StopAndCompensate:
+     * - Sync and recording: the compensation chain has COMPLETED before the
+     *   callback fires (synchronous invocation).
+     * - Queued: the compensation chain has been DISPATCHED as a Bus::chain
+     *   before the callback fires; individual CompensationStepJob instances
+     *   execute on their own workers LATER. The callback observes a
+     *   post-DISPATCH state, not a post-EXECUTION state.
+     *
+     * @var SerializableClosure|null
+     */
+    public ?SerializableClosure $onFailureCallback = null;
+
+    /**
+     * Pipeline-level onComplete callback (wrapped in SerializableClosure for queue transport).
+     *
+     * Populated by PipelineBuilder::run() / PipelineBuilder::toListener() /
+     * FakePipelineBuilder::executeWithRecording() after the manifest is
+     * created; defaults to null when the pipeline registers no onComplete
+     * callback. Fires AFTER onSuccess on the success path and AFTER
+     * onFailure on the failure path, always as the final callback on
+     * either terminal branch.
+     *
+     * @var SerializableClosure|null
+     */
+    public ?SerializableClosure $onCompleteCallback = null;
+
+    /**
      * Create a new pipeline manifest.
      *
      * @param string $pipelineId Unique identifier for this pipeline run (UUID).
@@ -211,6 +268,9 @@ final class PipelineManifest
             'beforeEachHooks' => $this->beforeEachHooks,
             'afterEachHooks' => $this->afterEachHooks,
             'onStepFailedHooks' => $this->onStepFailedHooks,
+            'onSuccessCallback' => $this->onSuccessCallback,
+            'onFailureCallback' => $this->onFailureCallback,
+            'onCompleteCallback' => $this->onCompleteCallback,
         ];
     }
 
@@ -243,5 +303,8 @@ final class PipelineManifest
         $this->beforeEachHooks = $data['beforeEachHooks'] ?? [];
         $this->afterEachHooks = $data['afterEachHooks'] ?? [];
         $this->onStepFailedHooks = $data['onStepFailedHooks'] ?? [];
+        $this->onSuccessCallback = $data['onSuccessCallback'] ?? null;
+        $this->onFailureCallback = $data['onFailureCallback'] ?? null;
+        $this->onCompleteCallback = $data['onCompleteCallback'] ?? null;
     }
 }
