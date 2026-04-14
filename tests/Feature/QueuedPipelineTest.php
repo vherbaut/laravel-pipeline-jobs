@@ -6,6 +6,7 @@ use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\PipelineStepJob;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -274,4 +275,214 @@ it('fires onStepFailed in queued mode under StopAndCompensate before dispatching
         'hook:'.FailingJob::class,
         'compensate:'.CompensateJobA::class,
     ])->and(CompensateJobA::$executed)->toBe([CompensateJobA::class]);
+});
+
+// --- Story 6.2: Pipeline-level callbacks (queued mode) ---
+
+it('pipeline-level: fires onSuccess and onComplete on last queued wrapper success', function (): void {
+    (new PipelineBuilder([TrackExecutionJobA::class]))
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
+});
+
+it('pipeline-level: fires onSuccess only once after the last of a multi-step queued pipeline', function (): void {
+    (new PipelineBuilder([TrackExecutionJobA::class, TrackExecutionJobB::class, TrackExecutionJobC::class]))
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    // AC #7: onSuccess fires once on the terminal wrapper, NOT on earlier ones.
+    expect(HookRecorder::$fired)->toBe(['onSuccess']);
+});
+
+it('pipeline-level: fires onFailure and onComplete on queued StopImmediately failure', function (): void {
+    try {
+        (new PipelineBuilder([TrackExecutionJobA::class, FailingJob::class]))
+            ->onSuccess(function (?PipelineContext $ctx): void {
+                HookRecorder::$fired[] = 'onSuccess';
+            })
+            ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+                HookRecorder::$fired[] = 'onFailure';
+            })
+            ->onComplete(function (?PipelineContext $ctx): void {
+                HookRecorder::$fired[] = 'onComplete';
+            })
+            ->send(new SimpleContext)
+            ->shouldBeQueued()
+            ->run();
+        fail('Expected RuntimeException to bubble up from the sync driver');
+    } catch (RuntimeException) {
+        // Expected: sync queue driver bubbles the step exception.
+    }
+
+    // AC #2, #3, #5: onFailure fires, then onComplete; onSuccess does NOT.
+    expect(HookRecorder::$fired)->toBe(['onFailure', 'onComplete']);
+});
+
+it('pipeline-level: fires onFailure after compensation dispatch in queued StopAndCompensate', function (): void {
+    CompensateJobA::$onHandle = function (): void {
+        HookRecorder::$fired[] = 'compensate';
+    };
+
+    try {
+        (new PipelineBuilder)
+            ->step(TrackExecutionJobA::class)
+            ->compensateWith(CompensateJobA::class)
+            ->step(FailingJob::class)
+            ->onFailure(FailStrategy::StopAndCompensate)
+            ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+                HookRecorder::$fired[] = 'onFailure';
+            })
+            ->send(new SimpleContext)
+            ->shouldBeQueued()
+            ->run();
+        fail('Expected RuntimeException to bubble up');
+    } catch (RuntimeException) {
+        // Expected.
+    } finally {
+        CompensateJobA::$onHandle = null;
+    }
+
+    // AC #11 queued clause: onFailure fires AFTER compensation Bus::chain
+    // dispatch. Because the sync queue driver executes the chain in-process,
+    // the compensation job runs before the rethrow from the failing wrapper's
+    // handle() completes and bubbles up — so 'compensate' appears in the
+    // recording before 'onFailure'.
+    expect(HookRecorder::$fired)->toBe(['compensate', 'onFailure']);
+});
+
+it('pipeline-level: does NOT fire onFailure under queued SkipAndContinue', function (): void {
+    (new PipelineBuilder([TrackExecutionJobA::class, FailingJob::class, TrackExecutionJobB::class]))
+        ->onFailure(FailStrategy::SkipAndContinue)
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+            HookRecorder::$fired[] = 'onFailure';
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    // AC #10: pipeline terminates via the success tail of the last wrapper,
+    // so onSuccess + onComplete fire; onFailure does NOT fire.
+    expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
+});
+
+it('pipeline-level: callback closures survive a serialize/unserialize roundtrip on PipelineStepJob', function (): void {
+    // AC #7 direct proof-point: construct a PipelineStepJob wrapping a manifest
+    // with all three callback slots populated, serialize/unserialize the job
+    // (mirroring what Laravel's queue does on dispatch + worker pickup), then
+    // invoke handle() on the reconstructed job and assert callbacks fire.
+    // This explicitly exercises the SerializableClosure queue boundary rather
+    // than relying on sync-driver implicit behavior from earlier tests.
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class],
+        context: new SimpleContext,
+    );
+
+    $manifest->onSuccessCallback = new SerializableClosure(function (?PipelineContext $ctx): void {
+        HookRecorder::$fired[] = 'onSuccess';
+    });
+    $manifest->onFailureCallback = new SerializableClosure(function (?PipelineContext $ctx, Throwable $e): void {
+        HookRecorder::$fired[] = 'onFailure';
+    });
+    $manifest->onCompleteCallback = new SerializableClosure(function (?PipelineContext $ctx): void {
+        HookRecorder::$fired[] = 'onComplete';
+    });
+
+    $job = new PipelineStepJob($manifest);
+    $rehydrated = unserialize(serialize($job));
+
+    expect($rehydrated)->toBeInstanceOf(PipelineStepJob::class)
+        ->and($rehydrated->manifest->onSuccessCallback)->toBeInstanceOf(SerializableClosure::class)
+        ->and($rehydrated->manifest->onFailureCallback)->toBeInstanceOf(SerializableClosure::class)
+        ->and($rehydrated->manifest->onCompleteCallback)->toBeInstanceOf(SerializableClosure::class);
+
+    $rehydrated->handle();
+
+    expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
+});
+
+it('pipeline-level: fires terminal callbacks when last queued step fails under SkipAndContinue', function (): void {
+    // P1 regression: the terminal wrapper must fire onSuccess + onComplete
+    // when advanceStep moves past the last step under SkipAndContinue.
+    // Before the fix, the handler returned silently without firing callbacks.
+    (new PipelineBuilder([TrackExecutionJobA::class, FailingJob::class]))
+        ->onFailure(FailStrategy::SkipAndContinue)
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    // AC #10: SkipAndContinue pipelines always terminate via the success tail,
+    // so both terminal callbacks fire even when the last step failed.
+    expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
+});
+
+it('pipeline-level: fires terminal callbacks when last queued step is conditionally skipped', function (): void {
+    // P2 regression: a last step whose when()/unless() predicate excludes it
+    // still terminates the pipeline on this wrapper and must fire the
+    // terminal callbacks. Before the fix, the skip branch returned silently.
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)
+        ->unless(fn (?PipelineContext $ctx): bool => true, TrackExecutionJobB::class)
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
+});
+
+it('pipeline-level: queued onSuccess throw wraps as StepExecutionFailed with original step exception preserved', function (): void {
+    // P5 coverage + AC #5 queued parity: a throwing onSuccess on the terminal
+    // wrapper must land in failed_jobs as StepExecutionFailed. On the success
+    // tail there is no prior step exception, so $originalStepException is null.
+    try {
+        (new PipelineBuilder([TrackExecutionJobA::class]))
+            ->onSuccess(function (?PipelineContext $ctx): void {
+                throw new LogicException('onSuccess-boom');
+            })
+            ->onComplete(function (?PipelineContext $ctx): void {
+                HookRecorder::$fired[] = 'onComplete';
+            })
+            ->send(new SimpleContext)
+            ->shouldBeQueued()
+            ->run();
+        fail('Expected LogicException to bubble up');
+    } catch (LogicException $e) {
+        // Success tail throws propagate unwrapped (no prior step exception to
+        // wrap against); Laravel marks the wrapper failed with the callback
+        // exception per AC #12 queued clause.
+        expect($e->getMessage())->toBe('onSuccess-boom');
+    }
+
+    // onComplete is NOT called when onSuccess throws.
+    expect(HookRecorder::$fired)->toBe([]);
 });

@@ -518,3 +518,84 @@ it('captures hooks eagerly in toListener() so later builder mutations do not ble
 
     expect($calls)->toBe(['captured-at-toListener-time']);
 });
+
+// --- Story 6.2: Pipeline-level callbacks ---
+
+it('registers an onSuccess callback on the builder and passes it into the built PipelineDefinition', function () {
+    $callback = fn (?PipelineContext $ctx) => null;
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->onSuccess($callback)
+        ->build();
+
+    expect($definition->onSuccess)->toBe($callback);
+});
+
+it('registers an onComplete callback on the builder and passes it into the built PipelineDefinition', function () {
+    $callback = fn (?PipelineContext $ctx) => null;
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->onComplete($callback)
+        ->build();
+
+    expect($definition->onComplete)->toBe($callback);
+});
+
+it('registers an onFailure Closure callback alongside the FailStrategy setter', function () {
+    $callback = fn (?PipelineContext $ctx, Throwable $e) => null;
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->onFailure(FailStrategy::StopAndCompensate)
+        ->onFailure($callback)
+        ->build();
+
+    expect($definition->failStrategy)->toBe(FailStrategy::StopAndCompensate)
+        ->and($definition->onFailure)->toBe($callback);
+});
+
+it('applies last-write-wins for onSuccess, onFailure Closure, and onComplete', function () {
+    $success1 = fn (?PipelineContext $ctx) => null;
+    $success2 = fn (?PipelineContext $ctx) => null;
+    $complete1 = fn (?PipelineContext $ctx) => null;
+    $complete2 = fn (?PipelineContext $ctx) => null;
+    $failure1 = fn (?PipelineContext $ctx, Throwable $e) => null;
+    $failure2 = fn (?PipelineContext $ctx, Throwable $e) => null;
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->onSuccess($success1)
+        ->onSuccess($success2)
+        ->onComplete($complete1)
+        ->onComplete($complete2)
+        ->onFailure($failure1)
+        ->onFailure($failure2)
+        ->build();
+
+    expect($definition->onSuccess)->toBe($success2)
+        ->and($definition->onComplete)->toBe($complete2)
+        ->and($definition->onFailure)->toBe($failure2);
+});
+
+it('returns the same builder instance for fluent chaining from onSuccess() and onComplete()', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    expect($builder->onSuccess(fn (?PipelineContext $ctx) => null))->toBe($builder)
+        ->and($builder->onComplete(fn (?PipelineContext $ctx) => null))->toBe($builder);
+});
+
+it('returns the same builder instance for fluent chaining from onFailure(Closure)', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $result = $builder->onFailure(fn (?PipelineContext $ctx, Throwable $e) => null);
+
+    expect($result)->toBe($builder);
+});
+
+it('preserves the existing onFailure(FailStrategy) behavior unchanged after the union-type widening', function () {
+    $builder = (new PipelineBuilder([FakeJobA::class]))
+        ->onFailure(FailStrategy::SkipAndContinue);
+
+    $definition = $builder->build();
+
+    expect($definition->failStrategy)->toBe(FailStrategy::SkipAndContinue)
+        ->and($definition->onFailure)->toBeNull();
+});

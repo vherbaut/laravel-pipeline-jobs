@@ -56,10 +56,13 @@ final class RecordingExecutor implements PipelineExecutor
      * Mirrors SyncExecutor::execute() behaviorally: fires the three
      * Story 6.1 lifecycle hooks (beforeEach before handle(), afterEach
      * after successful handle() and before markStepCompleted(),
-     * onStepFailed inside catch before compensation) so tests using
-     * Pipeline::fake()->recording() observe the same hook contract as
-     * production. Hook side effects precede the snapshot capture so a
-     * recorded context reflects the post-hook state.
+     * onStepFailed inside catch before compensation) AND the three
+     * Story 6.2 pipeline-level callbacks (onSuccess + onComplete on the
+     * success tail, onFailure + onComplete on the failure path after
+     * compensation) so tests using Pipeline::fake()->recording() observe
+     * the same contract as SyncExecutor. Hook and callback side effects
+     * precede the snapshot capture on the success path so a recorded
+     * context reflects the post-hook state.
      *
      * @param PipelineDefinition $definition The immutable pipeline description containing steps and configuration.
      * @param PipelineManifest $manifest The mutable execution state carrying context and step progress.
@@ -131,7 +134,59 @@ final class RecordingExecutor implements PipelineExecutor
                     );
                 }
 
+                // Story 6.2 AC #10 / AC #13: under SkipAndContinue the
+                // recording executor mirrors SyncExecutor: log the skip,
+                // clear the live Throwable, advance past the failed step,
+                // and resume with the next step. Pipeline-level onFailure
+                // does NOT fire under SkipAndContinue; the loop reaches
+                // the success tail and fires onSuccess + onComplete there.
+                if ($manifest->failStrategy === FailStrategy::SkipAndContinue) {
+                    Log::warning('Pipeline step skipped under SkipAndContinue', [
+                        'pipelineId' => $manifest->pipelineId,
+                        'stepClass' => $stepClass,
+                        'stepIndex' => $stepIndex,
+                        'exception' => $exception->getMessage(),
+                    ]);
+
+                    $manifest->failureException = null;
+                    $manifest->advanceStep();
+
+                    continue;
+                }
+
                 $this->runCompensation($manifest);
+
+                // Story 6.2 AC #2, #11, #13: pipeline-level onFailure fires
+                // AFTER per-step onStepFailed AND AFTER compensation AND
+                // BEFORE the terminal rethrow, mirroring SyncExecutor for
+                // recording-mode parity.
+                try {
+                    $this->firePipelineCallback(
+                        $manifest->onFailureCallback,
+                        $manifest->context,
+                        $exception,
+                    );
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $stepClass,
+                        $callbackException,
+                        $exception,
+                    );
+                }
+
+                try {
+                    $this->firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $stepClass,
+                        $callbackException,
+                        $exception,
+                    );
+                }
 
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,
@@ -141,6 +196,11 @@ final class RecordingExecutor implements PipelineExecutor
                 );
             }
         }
+
+        // Story 6.2 AC #1, #13: onSuccess fires on terminal success, then
+        // onComplete. Recording-mode parity with SyncExecutor is load-bearing.
+        $this->firePipelineCallback($manifest->onSuccessCallback, $manifest->context);
+        $this->firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
 
         return $manifest->context;
     }
@@ -200,6 +260,41 @@ final class RecordingExecutor implements PipelineExecutor
 
             $closure($step, $context, $exception);
         }
+    }
+
+    /**
+     * Invoke a pipeline-level callback with the appropriate argument set.
+     *
+     * Mirrors SyncExecutor::firePipelineCallback() and
+     * PipelineStepJob::firePipelineCallback() per Story 5.2 Design
+     * Decision #2 (three-site duplication). Null-guards the callback slot
+     * for the zero-overhead fast path (AC #6); unwraps via getClosure() and
+     * invokes with either ($context) or ($context, $exception). Callback
+     * throws propagate; the caller handles AC #12 wrapping semantics.
+     *
+     * @param SerializableClosure|null $callback The wrapped pipeline-level callback, or null when not registered.
+     * @param PipelineContext|null $context The live pipeline context at firing time (may be null).
+     * @param Throwable|null $exception The caught throwable for onFailure; null for onSuccess/onComplete.
+     * @return void
+     */
+    private function firePipelineCallback(
+        ?SerializableClosure $callback,
+        ?PipelineContext $context,
+        ?Throwable $exception = null,
+    ): void {
+        if ($callback === null) {
+            return;
+        }
+
+        $closure = $callback->getClosure();
+
+        if ($exception === null) {
+            $closure($context);
+
+            return;
+        }
+
+        $closure($context, $exception);
     }
 
     /**

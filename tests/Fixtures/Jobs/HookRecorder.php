@@ -27,6 +27,29 @@ final class HookRecorder
     public static array $order = [];
 
     /**
+     * Ordered record of pipeline-level callback firings.
+     *
+     * Captures the sequence of `onSuccess`, `onFailure`, and `onComplete`
+     * invocations across sync, queued, and recording executors. Tests rely
+     * on this array both for firing-count assertions (count) and for
+     * ordering assertions (index) between Story 6.1 per-step hooks and
+     * Story 6.2 pipeline-level callbacks.
+     *
+     * @var array<int, string>
+     */
+    public static array $fired = [];
+
+    /**
+     * Exception captured by the most recent `onFailure` callback invocation.
+     *
+     * Populated when a test registers an `onFailure` callback that stores the
+     * second closure argument into this static. Cleared by reset().
+     *
+     * @var \Throwable|null
+     */
+    public static ?\Throwable $capturedException = null;
+
+    /**
      * Reset all static recording arrays. Call from test beforeEach hooks.
      *
      * @return void
@@ -37,5 +60,7 @@ final class HookRecorder
         self::$afterEach = [];
         self::$onStepFailed = [];
         self::$order = [];
+        self::$fired = [];
+        self::$capturedException = null;
     }
 }
