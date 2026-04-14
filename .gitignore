@@ -27,7 +27,6 @@ _ide_helper_models.php
 # Misc
 phpunit.xml
 testbench.yaml
-/docs
 /coverage
 
 # Environment
