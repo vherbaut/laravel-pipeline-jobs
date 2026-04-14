@@ -166,32 +166,76 @@ final class FakePipelineBuilder
     }
 
     /**
-     * Configure how the pipeline reacts when a step fails.
+     * Configure the pipeline's failure reaction (strategy or callback).
      *
-     * Behaviour:
+     * Delegates to PipelineBuilder::onFailure() with identical semantics.
+     *
+     * Strategy branch (FailStrategy) — last-write-wins saga strategy:
      * - FailStrategy::StopAndCompensate: halts execution and runs compensation
      *   jobs in reverse order (runtime wired in Story 5.2).
      * - FailStrategy::SkipAndContinue: logs the failure, skips the failed step
      *   and continues with the next step using the last successful context
      *   (runtime wired in Story 5.3).
      * - FailStrategy::StopImmediately: halts execution without running any
-     *   compensation. This is the default when onFailure() is never called
-     *   (preserves Epic 1 FR28 behavior).
+     *   compensation. This is the default when onFailure() is never called.
      *
-     * Last-write-wins: calling onFailure() multiple times silently overrides
-     * the previous strategy, matching the ergonomics of send(), shouldBeQueued(),
-     * and return().
+     * Callback branch (Closure) — last-write-wins pipeline-level failure
+     * callback invoked once on terminal failure under StopImmediately /
+     * StopAndCompensate. In Pipeline::fake() default mode the callback does
+     * NOT fire (no execution); in Pipeline::fake()->recording() it fires via
+     * RecordingExecutor.
      *
-     * In both fake and recording modes of Pipeline::fake(), the strategy is
-     * stored on the recorded PipelineDefinition for later inspection in
-     * assertions.
+     * The two branches are orthogonal storage slots: calling once with a
+     * FailStrategy and once with a Closure registers BOTH independently.
      *
-     * @param FailStrategy $strategy The strategy to apply when a step fails.
+     * @param FailStrategy|Closure(?PipelineContext, \Throwable): void $strategyOrCallback Either the saga strategy or a callback invoked once on terminal pipeline failure.
      * @return static
      */
-    public function onFailure(FailStrategy $strategy): static
+    public function onFailure(FailStrategy|Closure $strategyOrCallback): static
     {
-        $this->builder->onFailure($strategy);
+        $this->builder->onFailure($strategyOrCallback);
+
+        return $this;
+    }
+
+    /**
+     * Register a closure invoked once when the pipeline terminates successfully.
+     *
+     * Delegates to PipelineBuilder::onSuccess(). In Pipeline::fake() default
+     * mode the callback does NOT fire (no execution); in
+     * Pipeline::fake()->recording() it fires via RecordingExecutor with the
+     * same contract as SyncExecutor.
+     *
+     * Last-write-wins: calling onSuccess() multiple times silently overrides
+     * the previously registered closure.
+     *
+     * @param Closure(?PipelineContext): void $callback Closure invoked once on terminal pipeline success.
+     * @return static
+     */
+    public function onSuccess(Closure $callback): static
+    {
+        $this->builder->onSuccess($callback);
+
+        return $this;
+    }
+
+    /**
+     * Register a closure invoked once when the pipeline terminates (success or failure).
+     *
+     * Delegates to PipelineBuilder::onComplete(). In Pipeline::fake() default
+     * mode the callback does NOT fire (no execution); in
+     * Pipeline::fake()->recording() it fires via RecordingExecutor with the
+     * same contract as SyncExecutor.
+     *
+     * Last-write-wins: calling onComplete() multiple times silently overrides
+     * the previously registered closure.
+     *
+     * @param Closure(?PipelineContext): void $callback Closure invoked once on pipeline termination.
+     * @return static
+     */
+    public function onComplete(Closure $callback): static
+    {
+        $this->builder->onComplete($callback);
 
         return $this;
     }
@@ -387,6 +431,7 @@ final class FakePipelineBuilder
 
         // Story 6.1: mirror the PipelineBuilder wiring so RecordingExecutor
         // observes the same hook contract as SyncExecutor (AC #10).
+        // Also mirrors the Story 6.2 pipeline-level callback wiring.
         $manifest->beforeEachHooks = array_map(
             static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
             $definition->beforeEachHooks,
@@ -399,6 +444,16 @@ final class FakePipelineBuilder
             static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
             $definition->onStepFailedHooks,
         );
+
+        $manifest->onSuccessCallback = $definition->onSuccess === null
+            ? null
+            : new SerializableClosure($definition->onSuccess);
+        $manifest->onFailureCallback = $definition->onFailure === null
+            ? null
+            : new SerializableClosure($definition->onFailure);
+        $manifest->onCompleteCallback = $definition->onComplete === null
+            ? null
+            : new SerializableClosure($definition->onComplete);
 
         $executor = new RecordingExecutor;
 

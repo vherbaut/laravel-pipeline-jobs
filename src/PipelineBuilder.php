@@ -41,6 +41,15 @@ final class PipelineBuilder
     /** @var array<int, Closure> */
     private array $onStepFailedHooks = [];
 
+    /** @var (Closure(?PipelineContext): void)|null */
+    private ?Closure $onSuccessCallback = null;
+
+    /** @var (Closure(?PipelineContext, \Throwable): void)|null */
+    private ?Closure $onFailureCallback = null;
+
+    /** @var (Closure(?PipelineContext): void)|null */
+    private ?Closure $onCompleteCallback = null;
+
     /**
      * Create a new pipeline builder.
      *
@@ -239,9 +248,11 @@ final class PipelineBuilder
     }
 
     /**
-     * Configure how the pipeline reacts when a step fails.
+     * Configure the pipeline's failure reaction.
      *
-     * Behaviour:
+     * This method has two orthogonal behaviors driven by the argument type:
+     *
+     * Strategy branch (FailStrategy) — last-write-wins strategy setter:
      * - FailStrategy::StopAndCompensate: halts execution and runs compensation
      *   jobs in reverse order (runtime wired in Story 5.2).
      * - FailStrategy::SkipAndContinue: logs the failure, skips the failed step
@@ -251,16 +262,118 @@ final class PipelineBuilder
      *   compensation. This is the default when onFailure() is never called
      *   (preserves Epic 1 FR28 behavior).
      *
-     * Last-write-wins: calling onFailure() multiple times silently overrides
-     * the previous strategy, matching the ergonomics of send(), shouldBeQueued(),
-     * and return().
+     * Callback branch (Closure) — last-write-wins pipeline-level callback:
+     * - Registers a closure invoked once on terminal pipeline failure under
+     *   StopImmediately or StopAndCompensate. The callback fires AFTER per-step
+     *   onStepFailed hooks (Story 6.1), AFTER compensation (sync: chain has
+     *   fully run; queued: chain has been dispatched — individual jobs execute
+     *   on their own workers LATER), and BEFORE the terminal rethrow. Under
+     *   FailStrategy::SkipAndContinue the callback does NOT fire because
+     *   there is no terminal throw.
+     * - A throw from the callback closure wraps as StepExecutionFailed via
+     *   StepExecutionFailed::forCallbackFailure: the callback exception is
+     *   attached as $previous, and the original step exception is preserved
+     *   on StepExecutionFailed::$originalStepException so observability is
+     *   retained. This parity holds across sync, queued, and recording modes.
+     * - Closures cross the queue boundary via SerializableClosure when the
+     *   pipeline runs queued. Registrations made AFTER toListener() returns
+     *   do not affect the already-built listener; the closure is captured by
+     *   value at toListener() time.
      *
-     * @param FailStrategy $strategy The strategy to apply when a step fails.
+     * The two branches are orthogonal storage slots: calling once with a
+     * FailStrategy and once with a Closure registers BOTH independently.
+     * Calling twice with the same kind is last-write-wins within that kind.
+     *
+     * @param FailStrategy|(Closure(?PipelineContext, \Throwable): void) $strategyOrCallback Either the saga strategy to apply, or a callback invoked once on terminal pipeline failure.
      * @return static
      */
-    public function onFailure(FailStrategy $strategy): static
+    public function onFailure(FailStrategy|Closure $strategyOrCallback): static
     {
-        $this->failStrategy = $strategy;
+        if ($strategyOrCallback instanceof FailStrategy) {
+            $this->failStrategy = $strategyOrCallback;
+
+            return $this;
+        }
+
+        $this->onFailureCallback = $strategyOrCallback;
+
+        return $this;
+    }
+
+    /**
+     * Register a closure invoked once when the pipeline reaches its terminal
+     * success branch.
+     *
+     * The callback semantic is "the pipeline completed its intended flow
+     * without a terminal failure" — NOT "every step succeeded". Under
+     * FailStrategy::SkipAndContinue intermediate step failures are converted
+     * into continuations, so the pipeline reaches the success tail and
+     * onSuccess fires even when some (or all) intermediate steps were
+     * skip-recovered. Users needing per-step failure observability should
+     * register onStepFailed per-step hooks (Story 6.1).
+     *
+     * Fires on the success tail of the executor (sync mode: just before the
+     * final context is returned; queued mode: on the worker that handles the
+     * last step — including the terminal wrapper when the last step is
+     * conditionally skipped or skip-recovered; recording mode: mirrors sync).
+     *
+     * Last-write-wins: calling onSuccess() multiple times silently overrides
+     * the previously registered closure. When both onSuccess and onComplete
+     * are registered, onSuccess fires first and onComplete second. A throw
+     * from the onSuccess closure propagates unwrapped (NOT wrapped as
+     * StepExecutionFailed) and aborts onComplete.
+     *
+     * Zero-overhead contract: when no onSuccess callback is registered, the
+     * executor performs no callback check on the success tail beyond a
+     * single null-guard (FR37, NFR2).
+     *
+     * Closures cross the queue boundary via SerializableClosure when the
+     * pipeline runs queued; non-serializable closures produce the standard
+     * SerializableClosure exception at dispatch time. Registrations made
+     * AFTER toListener() returns do not affect the already-built listener;
+     * the closure is captured by value at toListener() time.
+     *
+     * @param Closure(?PipelineContext): void $callback Closure invoked once on terminal pipeline success.
+     * @return static
+     */
+    public function onSuccess(Closure $callback): static
+    {
+        $this->onSuccessCallback = $callback;
+
+        return $this;
+    }
+
+    /**
+     * Register a closure invoked once when the pipeline terminates (success or failure).
+     *
+     * Fires AFTER onSuccess on the success path and AFTER onFailure on the
+     * failure path. Fires on the success tail under FailStrategy::SkipAndContinue
+     * regardless of intermediate step failures (mirrors onSuccess semantic).
+     *
+     * Not reached when a preceding callback (onSuccess or onFailure) throws.
+     *
+     * Last-write-wins: calling onComplete() multiple times silently overrides
+     * the previously registered closure. A throw from the onComplete closure
+     * propagates as StepExecutionFailed on the failure path (wrapped via
+     * StepExecutionFailed::forCallbackFailure with the original step exception
+     * preserved on $originalStepException, and the callback attached as
+     * $previous). On the success path an onComplete throw bubbles out
+     * unwrapped because no step exception was in flight.
+     *
+     * Zero-overhead contract matches onSuccess: a single null-guard when the
+     * callback is not registered.
+     *
+     * Closures cross the queue boundary via SerializableClosure when the
+     * pipeline runs queued. Registrations made AFTER toListener() returns
+     * do not affect the already-built listener; the closure is captured by
+     * value at toListener() time.
+     *
+     * @param Closure(?PipelineContext): void $callback Closure invoked once on pipeline termination.
+     * @return static
+     */
+    public function onComplete(Closure $callback): static
+    {
+        $this->onCompleteCallback = $callback;
 
         return $this;
     }
@@ -375,6 +488,9 @@ final class PipelineBuilder
             beforeEachHooks: $this->beforeEachHooks,
             afterEachHooks: $this->afterEachHooks,
             onStepFailedHooks: $this->onStepFailedHooks,
+            onComplete: $this->onCompleteCallback,
+            onSuccess: $this->onSuccessCallback,
+            onFailure: $this->onFailureCallback,
             failStrategy: $this->failStrategy,
         );
     }
@@ -419,6 +535,11 @@ final class PipelineBuilder
         $manifest->beforeEachHooks = $hookClosures['beforeEach'];
         $manifest->afterEachHooks = $hookClosures['afterEach'];
         $manifest->onStepFailedHooks = $hookClosures['onStepFailed'];
+
+        $callbackClosures = $this->buildCallbackSerializableClosures($definition);
+        $manifest->onCompleteCallback = $callbackClosures['onComplete'];
+        $manifest->onSuccessCallback = $callbackClosures['onSuccess'];
+        $manifest->onFailureCallback = $callbackClosures['onFailure'];
 
         if ($definition->shouldBeQueued) {
             // AC #4: queued mode always returns null; return() is sync-only.
@@ -469,8 +590,9 @@ final class PipelineBuilder
 
         $stepConditions = $this->buildStepConditions($definition);
         $hookClosures = $this->buildHookSerializableClosures($definition);
+        $callbackClosures = $this->buildCallbackSerializableClosures($definition);
 
-        return function (object $event) use ($definition, $contextSource, $shouldBeQueued, $stepConditions, $hookClosures): void {
+        return function (object $event) use ($definition, $contextSource, $shouldBeQueued, $stepConditions, $hookClosures, $callbackClosures): void {
             $resolvedContext = $contextSource instanceof Closure
                 ? ($contextSource)($event)
                 : $contextSource;
@@ -491,6 +613,10 @@ final class PipelineBuilder
             $manifest->beforeEachHooks = $hookClosures['beforeEach'];
             $manifest->afterEachHooks = $hookClosures['afterEach'];
             $manifest->onStepFailedHooks = $hookClosures['onStepFailed'];
+
+            $manifest->onCompleteCallback = $callbackClosures['onComplete'];
+            $manifest->onSuccessCallback = $callbackClosures['onSuccess'];
+            $manifest->onFailureCallback = $callbackClosures['onFailure'];
 
             if ($shouldBeQueued) {
                 (new QueuedExecutor)->execute($definition, $manifest);
@@ -571,6 +697,34 @@ final class PipelineBuilder
                 static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
                 $definition->onStepFailedHooks,
             ),
+        ];
+    }
+
+    /**
+     * Wrap the pipeline-level callback closures in SerializableClosure for queue transport.
+     *
+     * Mirrors buildHookSerializableClosures() but for the three nullable
+     * singular callback slots (onComplete, onSuccess, onFailure) rather
+     * than the append-semantic hook arrays. Null callback slots on the
+     * definition produce null SerializableClosure slots on the returned
+     * array so the manifest's null-guard fast path remains intact.
+     *
+     * @param PipelineDefinition $definition The built pipeline definition carrying the three nullable Closure slots.
+     *
+     * @return array{onComplete: SerializableClosure|null, onSuccess: SerializableClosure|null, onFailure: SerializableClosure|null} Wrapped callback closures keyed by callback kind.
+     */
+    private function buildCallbackSerializableClosures(PipelineDefinition $definition): array
+    {
+        return [
+            'onComplete' => $definition->onComplete === null
+                ? null
+                : new SerializableClosure($definition->onComplete),
+            'onSuccess' => $definition->onSuccess === null
+                ? null
+                : new SerializableClosure($definition->onSuccess),
+            'onFailure' => $definition->onFailure === null
+                ? null
+                : new SerializableClosure($definition->onFailure),
         ];
     }
 }

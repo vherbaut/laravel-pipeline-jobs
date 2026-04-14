@@ -70,6 +70,22 @@ final class SyncExecutor implements PipelineExecutor
      * applies); onStepFailed throws bypass the FailStrategy for the current
      * failure.
      *
+     * Pipeline-level lifecycle callbacks (Story 6.2) fire at two points:
+     *
+     * - On terminal success (all steps ran, pipeline returns): onSuccess
+     *   fires first, then onComplete. Under FailStrategy::SkipAndContinue the
+     *   pipeline reaches the success tail and fires both callbacks regardless
+     *   of whether intermediate steps failed (AC #10).
+     * - On terminal failure (StopImmediately rethrow, or StopAndCompensate
+     *   post-compensation rethrow): onFailure fires first, then onComplete.
+     *   Under SkipAndContinue this branch is unreachable.
+     *
+     * Callback throws propagate: onSuccess/onComplete throws bubble out
+     * unwrapped; a throwing onFailure is wrapped as StepExecutionFailed with
+     * the original step exception attached as \Throwable::getPrevious;
+     * onComplete-after-onFailure throws bubble out unwrapped, replacing the
+     * intended StepExecutionFailed rethrow.
+     *
      * @param PipelineDefinition $definition The immutable pipeline description containing steps and configuration.
      * @param PipelineManifest $manifest The mutable execution state carrying context and step progress.
      * @return PipelineContext|null The final pipeline context after execution, or null if the pipeline has no context.
@@ -166,6 +182,47 @@ final class SyncExecutor implements PipelineExecutor
                     $this->runCompensationChain($manifest);
                 }
 
+                // Story 6.2 AC #2, #11: pipeline-level onFailure fires AFTER
+                // per-step onStepFailed (Story 6.1) AND AFTER compensation
+                // (under StopAndCompensate) AND BEFORE the terminal rethrow.
+                // Under SkipAndContinue this block is unreachable (AC #10).
+                try {
+                    $this->firePipelineCallback(
+                        $manifest->onFailureCallback,
+                        $manifest->context,
+                        $exception,
+                    );
+                } catch (Throwable $callbackException) {
+                    // AC #12 sync failure path: a throwing onFailure replaces
+                    // the original step exception as the bubbling Throwable;
+                    // the original is preserved on
+                    // StepExecutionFailed::$originalStepException so
+                    // observability is retained. onComplete is NOT called.
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $stepClass,
+                        $callbackException,
+                        $exception,
+                    );
+                }
+
+                try {
+                    $this->firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
+                } catch (Throwable $callbackException) {
+                    // AC #12 sync failure path: a throwing onComplete replaces
+                    // the originally-intended StepExecutionFailed rethrow; the
+                    // original step exception is preserved on
+                    // StepExecutionFailed::$originalStepException.
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $stepClass,
+                        $callbackException,
+                        $exception,
+                    );
+                }
+
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,
                     $manifest->currentStepIndex,
@@ -175,7 +232,52 @@ final class SyncExecutor implements PipelineExecutor
             }
         }
 
+        // Story 6.2 AC #1, #3, #4: onSuccess fires on terminal success, then
+        // onComplete. A throw from onSuccess short-circuits onComplete
+        // naturally (AC #12); a throw from onComplete bubbles out unwrapped.
+        $this->firePipelineCallback($manifest->onSuccessCallback, $manifest->context);
+        $this->firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
+
         return $manifest->context;
+    }
+
+    /**
+     * Invoke a pipeline-level callback with the appropriate argument set.
+     *
+     * Null-guards on the callback slot (zero-overhead contract, AC #6);
+     * unwraps the SerializableClosure via getClosure() and calls it with
+     * $context alone for onSuccess/onComplete, or ($context, $exception)
+     * for onFailure. A throw from the invoked closure propagates unchanged
+     * (no silent swallow, architecture.md:395); caller sites handle the
+     * sync/queued wrapping semantics (AC #12).
+     *
+     * Duplicated across SyncExecutor, PipelineStepJob, and RecordingExecutor
+     * per Story 5.2 Design Decision #2 (three-site duplication over shared
+     * helper for readability).
+     *
+     * @param SerializableClosure|null $callback The wrapped pipeline-level callback, or null when not registered.
+     * @param PipelineContext|null $context The live pipeline context at firing time (may be null).
+     * @param Throwable|null $exception The caught throwable for onFailure; null for onSuccess/onComplete.
+     * @return void
+     */
+    private function firePipelineCallback(
+        ?SerializableClosure $callback,
+        ?PipelineContext $context,
+        ?Throwable $exception = null,
+    ): void {
+        if ($callback === null) {
+            return;
+        }
+
+        $closure = $callback->getClosure();
+
+        if ($exception === null) {
+            $closure($context);
+
+            return;
+        }
+
+        $closure($context, $exception);
     }
 
     /**

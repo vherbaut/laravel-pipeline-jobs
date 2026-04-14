@@ -170,6 +170,68 @@ it('restores empty hook arrays when deserializing a legacy payload without hook 
         ->and($restored->onStepFailedHooks)->toBe([]);
 });
 
+it('preserves onSuccessCallback through SerializableClosure round-trip', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+    $manifest->onSuccessCallback = new SerializableClosure(fn () => 'success-value');
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->onSuccessCallback)->toBeInstanceOf(SerializableClosure::class)
+        ->and(($restored->onSuccessCallback->getClosure())())->toBe('success-value');
+});
+
+it('preserves onFailureCallback through SerializableClosure round-trip', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+    $manifest->onFailureCallback = new SerializableClosure(fn () => 'failure-value');
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->onFailureCallback)->toBeInstanceOf(SerializableClosure::class)
+        ->and(($restored->onFailureCallback->getClosure())())->toBe('failure-value');
+});
+
+it('preserves onCompleteCallback through SerializableClosure round-trip', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+    $manifest->onCompleteCallback = new SerializableClosure(fn () => 'complete-value');
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->onCompleteCallback)->toBeInstanceOf(SerializableClosure::class)
+        ->and(($restored->onCompleteCallback->getClosure())())->toBe('complete-value');
+});
+
+it('restores null callback slots when deserializing a legacy payload without callback keys', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+
+    // Emulate a legacy payload from before Story 6.2 (no callback keys).
+    $legacyPayload = [
+        'pipelineId' => $manifest->pipelineId,
+        'pipelineName' => null,
+        'stepClasses' => ['App\\Jobs\\Step'],
+        'compensationMapping' => [],
+        'stepConditions' => [],
+        'currentStepIndex' => 0,
+        'completedSteps' => [],
+        'context' => null,
+        'failStrategy' => $manifest->failStrategy,
+        'failedStepClass' => null,
+        'failedStepIndex' => null,
+        'beforeEachHooks' => [],
+        'afterEachHooks' => [],
+        'onStepFailedHooks' => [],
+    ];
+
+    $restored = (new ReflectionClass(PipelineManifest::class))->newInstanceWithoutConstructor();
+    $restored->__unserialize($legacyPayload);
+
+    expect($restored->onSuccessCallback)->toBeNull()
+        ->and($restored->onFailureCallback)->toBeNull()
+        ->and($restored->onCompleteCallback)->toBeNull();
+});
+
 it('preserves PipelineContext through serialization round-trip', function () {
     $context = new SimpleContext;
     $context->name = 'test-pipeline';

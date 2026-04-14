@@ -107,3 +107,20 @@ it('stores beforeEach/afterEach/onStepFailed hooks passed at construction', func
         ->and($definition->afterEachHooks)->toBe([$after])
         ->and($definition->onStepFailedHooks)->toBe([$failed]);
 });
+
+it('stores onSuccess/onFailure/onComplete callbacks passed at construction', function () {
+    $onSuccess = fn () => null;
+    $onFailure = fn () => null;
+    $onComplete = fn () => null;
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass('App\\Jobs\\Step')],
+        onComplete: $onComplete,
+        onSuccess: $onSuccess,
+        onFailure: $onFailure,
+    );
+
+    expect($definition->onSuccess)->toBe($onSuccess)
+        ->and($definition->onFailure)->toBe($onFailure)
+        ->and($definition->onComplete)->toBe($onComplete);
+});

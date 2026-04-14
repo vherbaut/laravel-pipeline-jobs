@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
+use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
@@ -239,4 +241,99 @@ it('exposes beforeEach/afterEach/onStepFailed on FakePipelineBuilder delegating 
     expect($recorded->definition->beforeEachHooks)->toBe([$beforeHook])
         ->and($recorded->definition->afterEachHooks)->toBe([$afterHook])
         ->and($recorded->definition->onStepFailedHooks)->toBe([$failedHook]);
+});
+
+// --- Story 6.2: Pipeline-level callbacks on PipelineFake / FakePipelineBuilder ---
+
+it('pipeline-level: fires onSuccess and onComplete in Pipeline::fake()->recording() mode', function (): void {
+    Pipeline::fake()->recording();
+
+    Pipeline::make([TrackExecutionJobA::class])
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
+});
+
+it('pipeline-level: does NOT fire callbacks in Pipeline::fake() default mode because no steps run', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([TrackExecutionJobA::class])
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(HookRecorder::$fired)->toBe([])
+        ->and(TrackExecutionJob::$executionOrder)->toBe([]);
+});
+
+it('pipeline-level: exposes onSuccess/onFailure/onComplete on FakePipelineBuilder delegating to the underlying builder', function (): void {
+    Pipeline::fake();
+
+    $onSuccess = function (?PipelineContext $ctx): void {};
+    $onFailure = function (?PipelineContext $ctx, Throwable $e): void {};
+    $onComplete = function (?PipelineContext $ctx): void {};
+
+    Pipeline::make([TrackExecutionJobA::class])
+        ->onSuccess($onSuccess)
+        ->onFailure($onFailure)
+        ->onComplete($onComplete)
+        ->send(new SimpleContext)
+        ->run();
+
+    $recorded = Pipeline::recordedPipelines()[0] ?? null;
+    expect($recorded)->not->toBeNull();
+    expect($recorded->definition->onSuccess)->toBe($onSuccess)
+        ->and($recorded->definition->onFailure)->toBe($onFailure)
+        ->and($recorded->definition->onComplete)->toBe($onComplete);
+});
+
+it('pipeline-level: onFailure(FailStrategy) still routes through the fake', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([TrackExecutionJobA::class])
+        ->onFailure(FailStrategy::StopAndCompensate)
+        ->send(new SimpleContext)
+        ->run();
+
+    $recorded = Pipeline::recordedPipelines()[0] ?? null;
+    expect($recorded)->not->toBeNull();
+    expect($recorded->definition->failStrategy)->toBe(FailStrategy::StopAndCompensate)
+        ->and($recorded->definition->onFailure)->toBeNull();
+});
+
+it('pipeline-level: recording mode under SkipAndContinue fires onSuccess and onComplete, not onFailure', function (): void {
+    // P3 regression: RecordingExecutor previously had no SkipAndContinue
+    // branch — under a failing step with SkipAndContinue it fired onFailure
+    // and threw StepExecutionFailed, violating AC #10 / AC #13. The fix
+    // mirrors SyncExecutor by clearing failureException, advancing past
+    // the failed step, and continuing to the success tail.
+    Pipeline::fake()->recording();
+
+    Pipeline::make([TrackExecutionJobA::class, FailingJob::class])
+        ->onFailure(FailStrategy::SkipAndContinue)
+        ->onSuccess(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onSuccess';
+        })
+        ->onFailure(function (?PipelineContext $ctx, Throwable $e): void {
+            HookRecorder::$fired[] = 'onFailure';
+        })
+        ->onComplete(function (?PipelineContext $ctx): void {
+            HookRecorder::$fired[] = 'onComplete';
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
 });
