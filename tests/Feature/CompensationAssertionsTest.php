@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobA;
@@ -30,6 +31,7 @@ it('runs compensation in reverse order when middle step fails in a 3-step pipeli
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(FailingJob::class)->compensateWith(CompensateJobC::class)
         ->step(TrackExecutionJobB::class)->compensateWith(CompensateJobB::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -67,6 +69,7 @@ it('only compensates steps that have compensation defined', function (): void {
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(TrackExecutionJobB::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -87,6 +90,7 @@ it('works with the fluent step()->compensateWith() API', function (): void {
         ->step(TrackExecutionJobB::class)
         ->compensateWith(CompensateJobB::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -106,6 +110,7 @@ it('compensation and step assertions work together on same recorded pipeline', f
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(TrackExecutionJobB::class)->compensateWith(CompensateJobB::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -134,6 +139,7 @@ it('compensation and context assertions work together (context state at failure 
     Pipeline::make()
         ->step(EnrichContextJob::class)->compensateWith(CompensateJobA::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -156,6 +162,7 @@ it('does not run compensation for a conditional step that was skipped', function
         ->when(fn (SimpleContext $c) => $c->active, TrackExecutionJobB::class)
         ->compensateWith(CompensateJobB::class)
         ->step(FailingJob::class)->compensateWith(CompensateJobC::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send($context)
         ->run();
 

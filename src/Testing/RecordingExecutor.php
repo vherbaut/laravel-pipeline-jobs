@@ -4,10 +4,21 @@ declare(strict_types=1);
 
 namespace Vherbaut\LaravelPipelineJobs\Testing;
 
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
+use LogicException;
+use ReflectionMethod;
+use ReflectionNamedType;
 use ReflectionProperty;
+use ReflectionType;
+use ReflectionUnionType;
 use Throwable;
+use Vherbaut\LaravelPipelineJobs\Context\FailureContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Contracts\CompensableJob;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+use Vherbaut\LaravelPipelineJobs\Events\CompensationFailed as CompensationFailedEvent;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\PipelineExecutor;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
@@ -74,6 +85,10 @@ final class RecordingExecutor implements PipelineExecutor
                     $this->contextSnapshots[] = unserialize(serialize($manifest->context));
                 }
             } catch (Throwable $exception) {
+                $manifest->failureException = $exception;
+                $manifest->failedStepClass = $stepClass;
+                $manifest->failedStepIndex = $stepIndex;
+
                 $this->runCompensation($manifest);
 
                 throw StepExecutionFailed::forStep(
@@ -162,20 +177,29 @@ final class RecordingExecutor implements PipelineExecutor
     /**
      * Run compensation jobs for completed steps in reverse order.
      *
-     * Only compensates steps that completed AND have a compensation mapping
-     * defined in the manifest. Each compensation job is instantiated via the
-     * container, injected with the manifest, and called synchronously.
+     * Guarded on the manifest's failStrategy: only fires when strategy is
+     * FailStrategy::StopAndCompensate AND a compensation mapping exists.
+     * StopImmediately and SkipAndContinue both skip compensation entirely
+     * (SkipAndContinue step-level handling is deferred to Story 5.3).
      *
-     * @param PipelineManifest $manifest The pipeline manifest containing compensation mapping.
+     * Uses the CompensableJob-or-trait bridge: instances implementing
+     * CompensableJob receive a compensate($context) call; otherwise the
+     * legacy Story 3.3 pattern fires (reflection-injected manifest plus
+     * app()->call([$job, 'handle'])). Per-compensation failures are
+     * silently swallowed so the chain continues.
+     *
+     * @param PipelineManifest $manifest The pipeline manifest carrying completed steps, compensation mapping, context, and strategy.
+     *
      * @return void
      */
     private function runCompensation(PipelineManifest $manifest): void
     {
-        if ($manifest->compensationMapping === []) {
+        if ($manifest->compensationMapping === [] || $manifest->failStrategy !== FailStrategy::StopAndCompensate) {
             return;
         }
 
         $reversedCompleted = array_reverse($manifest->completedSteps);
+        $failureContext = FailureContext::fromManifest($manifest);
 
         foreach ($reversedCompleted as $completedStep) {
             if (! isset($manifest->compensationMapping[$completedStep])) {
@@ -187,21 +211,149 @@ final class RecordingExecutor implements PipelineExecutor
             try {
                 $job = app()->make($compensationClass);
 
-                if (property_exists($job, 'pipelineManifest')) {
-                    $property = new ReflectionProperty($job, 'pipelineManifest');
-                    $property->setValue($job, $manifest);
+                if ($job instanceof CompensableJob) {
+                    $this->invokeCompensate($job, $manifest->context, $failureContext);
+                } else {
+                    if (property_exists($job, 'pipelineManifest')) {
+                        $property = new ReflectionProperty($job, 'pipelineManifest');
+                        $property->setValue($job, $manifest);
+                    }
+
+                    app()->call([$job, 'handle']);
                 }
 
-                app()->call([$job, 'handle']);
-
                 $this->compensationSteps[] = $compensationClass;
-            } catch (Throwable) {
+            } catch (Throwable $compensationException) {
                 $this->compensationSteps[] = $compensationClass;
+                $this->reportCompensationFailure(
+                    $manifest,
+                    $compensationClass,
+                    $manifest->failureException,
+                    $compensationException,
+                );
             }
         }
 
         if ($this->compensationSteps !== []) {
             $this->compensationTriggered = true;
         }
+    }
+
+    /**
+     * Invoke a CompensableJob's compensate() method, passing the FailureContext when the implementation accepts it.
+     *
+     * Mirrors SyncExecutor::invokeCompensate(): reflection-based dispatch
+     * that only passes the extra FailureContext argument when the
+     * implementation accepts a FailureContext-compatible second parameter.
+     * Rejects signatures that require more than two parameters. Duplicated
+     * deliberately across the three compensation bridges per Story 5.2 Design
+     * Decision #2 (duplication over premature helper extraction).
+     *
+     * @param CompensableJob $job The compensation job instance resolved from the container.
+     * @param PipelineContext|null $context The pipeline context present at the failure point.
+     * @param FailureContext|null $failure The failure-context snapshot, or null when no failure was recorded on the manifest.
+     * @return void
+     *
+     * @throws LogicException When the compensate() signature declares more than two required parameters.
+     */
+    private function invokeCompensate(CompensableJob $job, ?PipelineContext $context, ?FailureContext $failure): void
+    {
+        $method = new ReflectionMethod($job, 'compensate');
+
+        if ($method->getNumberOfRequiredParameters() > 2) {
+            throw new LogicException(sprintf(
+                'Compensation class [%s] declares compensate() with more than two required parameters; the executor only provides $context and $failure.',
+                $job::class,
+            ));
+        }
+
+        $args = self::compensateAcceptsFailureContext($method) ? [$context, $failure] : [$context];
+        $method->invoke($job, ...$args);
+    }
+
+    /**
+     * Decide whether a compensate() reflection method accepts a FailureContext as its second argument.
+     *
+     * @param ReflectionMethod $method The reflected compensate() method.
+     * @return bool True when a FailureContext instance can be safely passed as the second argument.
+     */
+    private static function compensateAcceptsFailureContext(ReflectionMethod $method): bool
+    {
+        if ($method->getNumberOfParameters() < 2) {
+            return false;
+        }
+
+        $type = $method->getParameters()[1]->getType();
+
+        if ($type === null) {
+            return true;
+        }
+
+        return self::typeAcceptsFailureContext($type);
+    }
+
+    /**
+     * Recursive type-compatibility probe for compensateAcceptsFailureContext().
+     *
+     * @param ReflectionType $type A reflected parameter type (named, union, or intersection).
+     * @return bool True when a FailureContext instance satisfies the declared type.
+     */
+    private static function typeAcceptsFailureContext(ReflectionType $type): bool
+    {
+        if ($type instanceof ReflectionNamedType) {
+            if ($type->isBuiltin()) {
+                return $type->getName() === 'mixed' || $type->getName() === 'object';
+            }
+
+            $name = $type->getName();
+
+            return $name === FailureContext::class || is_subclass_of(FailureContext::class, $name);
+        }
+
+        if ($type instanceof ReflectionUnionType) {
+            foreach ($type->getTypes() as $inner) {
+                if (self::typeAcceptsFailureContext($inner)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Emit the NFR6 observability pair for a compensation failure.
+     *
+     * Mirrors SyncExecutor::reportCompensationFailure() so tests that use
+     * Pipeline::fake()->recording() observe the same log + event signal as
+     * production. Invoked from inside the per-compensation catch block in
+     * runCompensation(); does not abort the chain (sync best-effort).
+     *
+     * @param PipelineManifest $manifest The manifest carrying pipelineId and failedStepClass.
+     * @param string $compensationClass Fully qualified class name of the compensation job that threw.
+     * @param Throwable|null $originalException Throwable raised by the failing step, or null when no failure was recorded.
+     * @param Throwable $compensationException Throwable raised by the compensation job itself.
+     * @return void
+     */
+    private function reportCompensationFailure(
+        PipelineManifest $manifest,
+        string $compensationClass,
+        ?Throwable $originalException,
+        Throwable $compensationException,
+    ): void {
+        Log::error('Pipeline compensation failed', [
+            'pipelineId' => $manifest->pipelineId,
+            'compensationClass' => $compensationClass,
+            'failedStepClass' => $manifest->failedStepClass,
+            'compensationException' => $compensationException->getMessage(),
+        ]);
+
+        Event::dispatch(new CompensationFailedEvent(
+            pipelineId: $manifest->pipelineId,
+            compensationClass: $compensationClass,
+            failedStepClass: $manifest->failedStepClass,
+            originalException: $originalException,
+            compensationException: $compensationException,
+        ));
     }
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 use PHPUnit\Framework\ExpectationFailedException;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
@@ -331,6 +332,7 @@ it('RecordingExecutor runs compensation in reverse order on step failure', funct
             TrackExecutionJobA::class => CompensateJobA::class,
             TrackExecutionJobB::class => CompensateJobB::class,
         ],
+        failStrategy: FailStrategy::StopAndCompensate,
     );
 
     $executor = new RecordingExecutor;
@@ -379,6 +381,7 @@ it('RecordingExecutor only compensates completed steps that have compensation de
         compensationMapping: [
             TrackExecutionJobA::class => CompensateJobA::class,
         ],
+        failStrategy: FailStrategy::StopAndCompensate,
     );
 
     $executor = new RecordingExecutor;
@@ -408,6 +411,7 @@ it('RecordingExecutor continues compensation and throws StepExecutionFailed even
             TrackExecutionJobA::class => CompensateJobA::class,
             TrackExecutionJobB::class => FailingCompensationJob::class,
         ],
+        failStrategy: FailStrategy::StopAndCompensate,
     );
 
     $executor = new RecordingExecutor;

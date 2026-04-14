@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Bus;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
@@ -108,6 +109,7 @@ it('compensation job sees forward-step mutations through pipelineContext()', fun
     Pipeline::make()
         ->step(EnrichContextJob::class)->compensateWith(CompensateJobA::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 

@@ -1,5 +1,7 @@
 # Laravel Pipeline Jobs
 
+> Une documentation en français est disponible dans [README-fr.md](README-fr.md).
+
 A Laravel package for building **job pipelines with typed context** and **saga pattern support**.
 
 Laravel's `Bus::chain()` is great for running jobs in sequence, but it treats each job as a black box. There is no built in way to pass data between steps, no compensation mechanism when things go wrong, and wiring event listeners to job chains requires boilerplate listener classes.
@@ -546,39 +548,138 @@ Both approaches are equivalent. The closure form (`send(fn ($event) => ...)`) is
 In distributed systems, when a multi step process fails partway through, you often need to undo the steps that already completed. This is the **saga pattern**, and it is built directly into the pipeline builder.
 
 ```php
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+
 JobPipeline::make()
     ->step(ReserveInventory::class)->compensateWith(ReleaseInventory::class)
     ->step(ChargeCustomer::class)->compensateWith(RefundCustomer::class)
     ->step(CreateShipment::class)->compensateWith(CancelShipment::class)
+    ->onFailure(FailStrategy::StopAndCompensate)
     ->send(new OrderContext(order: $order))
     ->run();
 ```
 
-**How compensation works:**
+#### Failure Strategies
+
+Every pipeline declares how failures are handled via `onFailure(FailStrategy)`. The default is `StopImmediately`, which means a pipeline with only `compensateWith()` mappings and no `onFailure()` call does **not** trigger compensation. You must explicitly opt in.
+
+| Strategy | Behaviour on step failure |
+|----------|---------------------------|
+| `FailStrategy::StopImmediately` (default) | Rethrows the failure as `StepExecutionFailed`. No compensation runs. |
+| `FailStrategy::StopAndCompensate` | Runs the compensation chain in reverse order over completed steps, then rethrows as `StepExecutionFailed`. |
+| `FailStrategy::SkipAndContinue` | Logs a warning, skips the failing step, and resumes with the next one. The pipeline does not throw. No compensation runs. |
+
+#### How StopAndCompensate works
 
 1. Steps execute in order: `ReserveInventory`, then `ChargeCustomer`, then `CreateShipment`.
 2. If `CreateShipment` throws an exception, compensation kicks in.
 3. Only the **completed** steps are compensated, in **reverse order**: `RefundCustomer` first, then `ReleaseInventory`.
 4. `CancelShipment` is **not** called because `CreateShipment` never completed.
+5. The original step exception is rethrown as `StepExecutionFailed` once the chain finishes (best effort in sync mode, chain halts on first throwing compensation in queued mode).
 
-Compensation jobs receive the same pipeline manifest (with context) as regular steps. This means they have access to all the data accumulated by the steps that did complete, which they need to perform the rollback.
+#### How SkipAndContinue works
 
-**A compensation job looks just like a regular step:**
+`SkipAndContinue` is useful for tolerant pipelines where a failing step should not abort the whole run. When a step throws:
+
+1. The failure is recorded on the manifest (`failedStepClass`, `failedStepIndex`, `failureException`).
+2. A `Log::warning('Pipeline step skipped under SkipAndContinue', [...])` is emitted with the pipeline id, step class, step index, and exception message.
+3. The pipeline advances to the next step and keeps executing.
+4. **No compensation runs** for skipped steps, even if `compensateWith()` was declared.
+5. If a later step succeeds, the failure fields are cleared. If another step fails, last failure wins.
 
 ```php
+JobPipeline::make()
+    ->step(FetchRemoteData::class)
+    ->step(ParseOptionalSection::class) // may throw, will be skipped
+    ->step(PersistResults::class)
+    ->onFailure(FailStrategy::SkipAndContinue)
+    ->send(new ImportContext)
+    ->run();
+```
+
+#### Two ways to write a compensation job
+
+**Trait based (same shape as a regular step).** The legacy approach: inject the manifest via the `InteractsWithPipeline` trait and implement `handle()`.
+
+```php
+use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
+
 class RefundCustomer
 {
-    public PipelineManifest $pipelineManifest;
+    use InteractsWithPipeline;
 
     public function handle(PaymentService $payments): void
     {
-        $context = $this->pipelineManifest->context;
+        $context = $this->pipelineContext();
         $payments->refund($context->invoice);
+
+        // Optional: inspect why the pipeline failed
+        $failure = $this->failureContext();
+        if ($failure !== null) {
+            logger()->info("Compensating after {$failure->failedStepClass}");
+        }
     }
 }
 ```
 
-If a compensation job itself throws an exception, it is swallowed (logged but not rethrown). The remaining compensation jobs continue to execute. This ensures that a failure in one rollback step does not prevent other rollbacks from running.
+**Contract based (recommended for new code).** Implement the `CompensableJob` interface. The executor invokes `compensate()` with the pipeline context and, optionally, a `FailureContext` snapshot.
+
+```php
+use Vherbaut\LaravelPipelineJobs\Context\FailureContext;
+use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\Contracts\CompensableJob;
+
+class RefundCustomer implements CompensableJob
+{
+    public function __construct(private PaymentService $payments) {}
+
+    public function compensate(PipelineContext $context, ?FailureContext $failure = null): void
+    {
+        $this->payments->refund($context->invoice);
+    }
+}
+```
+
+Implementations may keep the single argument signature (`compensate(PipelineContext $context)`); the executor inspects the signature via reflection and only passes the `FailureContext` when you widen to two parameters.
+
+#### Inspecting the failure
+
+`FailureContext` is a readonly value object carrying:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `failedStepClass` | `string` | Fully qualified class name of the step that threw. |
+| `failedStepIndex` | `int` | Zero based index of the failing step. |
+| `exception` | `?\Throwable` | The original throwable (non null in sync mode, always null in queued mode per NFR19 because `Throwable` is excluded from the serialized payload). |
+
+You can access it from any compensation job:
+
+- **Contract based jobs** receive it as the optional second argument of `compensate()`.
+- **Trait based jobs** call `$this->failureContext()` inside `handle()` to get the same snapshot.
+
+#### Observability on compensation failure
+
+When a compensation job itself throws:
+
+- Sync pipelines: a `Log::error('Pipeline compensation failed', [...])` line is emitted and the `Vherbaut\LaravelPipelineJobs\Events\CompensationFailed` event is dispatched. The per compensation exception is swallowed so the remaining compensations continue to run (best effort semantics).
+- Queued pipelines: the wrapper job lands in `failed_jobs` with Laravel's standard record. After the wrapper exhausts its tries (`$tries = 1`), the `failed()` hook emits a `Log::error('Pipeline compensation failed after retries', [...])` line and dispatches the same `CompensationFailed` event. The `Bus::chain` halts on the first failing compensation in queued mode (documented divergence with sync best effort).
+
+The `CompensationFailed` event fires **unconditionally**, independently of any user opt in to pipeline events. It is designed for operational alerting:
+
+```php
+use Vherbaut\LaravelPipelineJobs\Events\CompensationFailed as CompensationFailedEvent;
+
+Event::listen(CompensationFailedEvent::class, function (CompensationFailedEvent $event): void {
+    // $event->pipelineId
+    // $event->compensationClass
+    // $event->failedStepClass (nullable, string in production)
+    // $event->originalException (null in queued mode, Throwable in sync)
+    // $event->compensationException (Throwable, always non null)
+    Sentry::captureMessage("Rollback failed: {$event->compensationClass}");
+});
+```
+
+> The exception class `Vherbaut\LaravelPipelineJobs\Exceptions\CompensationFailed` shares its basename with the event. When importing both in the same file, alias one: `use Vherbaut\LaravelPipelineJobs\Events\CompensationFailed as CompensationFailedEvent;`.
 
 ## Testing
 
@@ -765,6 +866,7 @@ it('compensates completed steps on failure', function () {
 | `when(Closure $condition, string $jobClass)` | `static` | Append a step that runs only when the condition (evaluated against the live context) returns truthy. Condition must be serializable in queued mode. |
 | `unless(Closure $condition, string $jobClass)` | `static` | Append a step that runs only when the condition (evaluated against the live context) returns falsy. Condition must be serializable in queued mode. |
 | `compensateWith(string $jobClass)` | `static` | Assign a compensation job to the last added step. |
+| `onFailure(FailStrategy $strategy)` | `static` | Set the pipeline failure strategy (`StopImmediately` default, `StopAndCompensate`, `SkipAndContinue`). |
 | `send(PipelineContext\|Closure $context)` | `static` | Set the context (instance or closure for deferred resolution). |
 | `shouldBeQueued()` | `static` | Mark the pipeline for asynchronous queue execution. |
 | `return(Closure $callback)` | `static` | Register a closure that transforms the final context into the value returned by `run()`. Synchronous only. Ignored in queued mode. |
@@ -779,6 +881,37 @@ it('compensates completed steps on failure', function () {
 |--------|---------|-------------|
 | `pipelineContext()` | `?PipelineContext` | The live `PipelineContext` when the job runs inside a pipeline with a context, `null` otherwise. |
 | `hasPipelineContext()` | `bool` | `true` when a non null context is currently available, `false` for standalone dispatch or pipelines without `->send(...)`. |
+| `failureContext()` | `?FailureContext` | Snapshot of the latest failure recorded on the manifest, or `null` when no failure was recorded or the job runs outside a pipeline. Parallel accessor to `pipelineContext()`. |
+
+### `CompensableJob` contract
+
+Optional interface that compensation jobs may implement instead of using the `InteractsWithPipeline` trait pattern.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `compensate(PipelineContext $context, ?FailureContext $failure = null)` | `void` | Rollback hook invoked by the executor. The second argument is only delivered when the implementation widens the signature to two parameters (executor detects via reflection). |
+
+### `FailureContext`
+
+Readonly value object built from the manifest at invocation time.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `failedStepClass` | `string` | Fully qualified class name of the failing step. |
+| `failedStepIndex` | `int` | Zero based index of the failing step. |
+| `exception` | `?\Throwable` | Original throwable (non null in sync, always null in queued mode per NFR19). |
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `FailureContext::fromManifest(PipelineManifest $manifest)` | `?self` | Build a snapshot from the manifest, or `null` when no failure was recorded (`failedStepClass === null`). |
+
+### `FailStrategy` enum
+
+| Case | Meaning |
+|------|---------|
+| `StopImmediately` | Default. Rethrow as `StepExecutionFailed`, no compensation. |
+| `StopAndCompensate` | Run compensation chain in reverse order, then rethrow as `StepExecutionFailed`. |
+| `SkipAndContinue` | Log warning, skip the failing step, continue. No compensation. No throw. |
 
 ### `PipelineContext`
 
@@ -796,6 +929,10 @@ it('compensates completed steps on failure', function () {
 | `currentStepIndex` | `int` | Index of the currently executing step. |
 | `completedSteps` | `array<int, string>` | Steps that have completed successfully. |
 | `context` | `?PipelineContext` | The shared context object. |
+| `failStrategy` | `FailStrategy` | Pipeline level failure strategy set via `onFailure()`. |
+| `failedStepClass` | `?string` | Class name of the most recent failing step, or `null` when no failure has been recorded. |
+| `failedStepIndex` | `?int` | Zero based index of the most recent failing step, or `null`. |
+| `failureException` | `?\Throwable` | The live throwable from the most recent failure (null across the queue serialization boundary per NFR19). |
 
 ### `Pipeline` Facade
 
@@ -812,13 +949,20 @@ The `Pipeline` facade proxies to `JobPipeline` and adds the `fake()` method for 
 | `InvalidPipelineDefinition` | Pipeline has no steps, or `compensateWith()` called before any step. |
 | `StepExecutionFailed` | A step threw an exception during synchronous execution. Wraps the original exception. |
 | `ContextSerializationFailed` | Context contains non serializable properties (closures, resources, anonymous classes). |
+| `CompensationFailed` | Base exception class for rollback failures. Available for user code that wants to throw a typed exception from a compensation job. |
+
+### Events
+
+| Event | When |
+|-------|------|
+| `Vherbaut\LaravelPipelineJobs\Events\CompensationFailed` | Dispatched unconditionally when a compensation job throws (sync best effort catch, queued `failed()` hook). Carries `pipelineId`, `compensationClass`, `failedStepClass`, `originalException` (null in queued), `compensationException`. |
 
 ## Roadmap
 
 The following features are planned for future releases. The properties are already reserved in the codebase:
 
 - **Per step queue configuration.** Set queue name, connection, retry count, backoff, and timeout per step.
-- **Pipeline lifecycle hooks.** `beforeEach()`, `afterEach()`, `onStepFailed()`, `onSuccess()`, `onFailure()`, `onComplete()`.
+- **Pipeline lifecycle hooks.** `beforeEach()`, `afterEach()`, `onStepFailed()`, `onSuccess()`, `onComplete()`, plus a closure based failure callback (`onFailure(Closure)` overload or new name to avoid collision with the already shipped `onFailure(FailStrategy)` strategy setter).
 - **Named pipelines.** `name('order-fulfillment')` for better observability and logging.
 - **Parallel steps.** Fan out pattern for steps that can execute concurrently.
 - **Pipeline events.** Dispatch Laravel events at key lifecycle points.

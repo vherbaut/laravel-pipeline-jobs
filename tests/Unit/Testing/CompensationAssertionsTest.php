@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\ExpectationFailedException;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
@@ -29,6 +30,7 @@ it('assertCompensationWasTriggered passes when compensation ran', function (): v
     Pipeline::make()
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -68,6 +70,7 @@ it('assertCompensationNotTriggered fails when compensation triggered', function 
     Pipeline::make()
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -84,6 +87,7 @@ it('assertCompensationRan passes for executed compensation job', function (): vo
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(TrackExecutionJobB::class)->compensateWith(CompensateJobB::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -99,6 +103,7 @@ it('assertCompensationRan fails for non-executed compensation job', function ():
     Pipeline::make()
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -114,6 +119,7 @@ it('assertCompensationNotRan passes for compensation job that did not run', func
     Pipeline::make()
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -128,6 +134,7 @@ it('assertCompensationNotRan fails for executed compensation job', function (): 
     Pipeline::make()
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -144,6 +151,7 @@ it('assertCompensationExecutedInOrder passes with correct reverse order', functi
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(TrackExecutionJobB::class)->compensateWith(CompensateJobB::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -162,6 +170,7 @@ it('assertCompensationExecutedInOrder fails with wrong order', function (): void
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(TrackExecutionJobB::class)->compensateWith(CompensateJobB::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 
@@ -200,6 +209,7 @@ it('step and compensation assertions work together on same pipeline', function (
         ->step(TrackExecutionJobA::class)->compensateWith(CompensateJobA::class)
         ->step(TrackExecutionJobB::class)->compensateWith(CompensateJobB::class)
         ->step(FailingJob::class)
+        ->onFailure(FailStrategy::StopAndCompensate)
         ->send(new SimpleContext)
         ->run();
 

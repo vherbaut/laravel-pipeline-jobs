@@ -1,5 +1,7 @@
 # Laravel Pipeline Jobs
 
+> English documentation is available in [README.md](README.md).
+
 Un package Laravel pour construire des **pipelines de jobs avec un contexte typé** et le **support du pattern saga**.
 
 Le `Bus::chain()` de Laravel est pratique pour exécuter des jobs en séquence, mais il traite chaque job comme une boîte noire. Il n'existe aucun mécanisme natif pour transmettre des données entre les étapes, aucune compensation quand quelque chose échoue, et le câblage d'event listeners vers des chaînes de jobs nécessite des classes listener intermédiaires.
@@ -546,39 +548,138 @@ Les deux approches sont équivalentes. La forme closure (`send(fn ($event) => ..
 Dans les systèmes distribués, quand un processus multi étapes échoue en cours de route, il est souvent nécessaire d'annuler les étapes déjà complétées. C'est le **pattern saga**, et il est intégré directement dans le pipeline builder.
 
 ```php
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+
 JobPipeline::make()
     ->step(ReserveInventory::class)->compensateWith(ReleaseInventory::class)
     ->step(ChargeCustomer::class)->compensateWith(RefundCustomer::class)
     ->step(CreateShipment::class)->compensateWith(CancelShipment::class)
+    ->onFailure(FailStrategy::StopAndCompensate)
     ->send(new OrderContext(order: $order))
     ->run();
 ```
 
-**Comment fonctionne la compensation :**
+#### Stratégies d'échec
+
+Tout pipeline déclare sa gestion des échecs via `onFailure(FailStrategy)`. Le défaut est `StopImmediately`, ce qui signifie qu'un pipeline avec uniquement des `compensateWith()` et sans appel à `onFailure()` ne déclenche **pas** la compensation. Il faut l'activer explicitement.
+
+| Stratégie | Comportement en cas d'échec d'une étape |
+|-----------|------------------------------------------|
+| `FailStrategy::StopImmediately` (défaut) | Relance l'échec sous forme de `StepExecutionFailed`. Aucune compensation ne s'exécute. |
+| `FailStrategy::StopAndCompensate` | Exécute la chaîne de compensation en ordre inverse sur les étapes complétées, puis relance `StepExecutionFailed`. |
+| `FailStrategy::SkipAndContinue` | Logue un avertissement, ignore l'étape fautive et reprend avec la suivante. Le pipeline ne lève pas d'exception. Aucune compensation ne s'exécute. |
+
+#### Comment StopAndCompensate fonctionne
 
 1. Les étapes s'exécutent dans l'ordre : `ReserveInventory`, puis `ChargeCustomer`, puis `CreateShipment`.
 2. Si `CreateShipment` lève une exception, la compensation se déclenche.
 3. Seules les étapes **complétées** sont compensées, dans l'**ordre inverse** : `RefundCustomer` d'abord, puis `ReleaseInventory`.
 4. `CancelShipment` n'est **pas** appelé car `CreateShipment` n'a jamais été complété.
+5. L'exception d'origine est relancée sous forme de `StepExecutionFailed` une fois la chaîne terminée (best effort en synchrone, la chaîne s'arrête à la première compensation qui lève en queued).
 
-Les jobs de compensation reçoivent le même manifest de pipeline (avec le contexte) que les étapes normales. Ils ont donc accès à toutes les données accumulées par les étapes qui ont réussi, ce dont ils ont besoin pour effectuer le rollback.
+#### Comment SkipAndContinue fonctionne
 
-**Un job de compensation ressemble exactement à une étape normale :**
+`SkipAndContinue` est utile pour les pipelines tolérants où l'échec d'une étape ne doit pas interrompre toute l'exécution. Quand une étape lève :
+
+1. L'échec est enregistré sur le manifest (`failedStepClass`, `failedStepIndex`, `failureException`).
+2. Un `Log::warning('Pipeline step skipped under SkipAndContinue', [...])` est émis avec l'identifiant du pipeline, la classe de l'étape, son index et le message de l'exception.
+3. Le pipeline avance à l'étape suivante et continue son exécution.
+4. **Aucune compensation** ne tourne pour les étapes sautées, même si `compensateWith()` a été déclaré.
+5. Si une étape ultérieure réussit, les champs d'échec sont effacés. Si une autre étape échoue, c'est la dernière qui est retenue (last failure wins).
 
 ```php
+JobPipeline::make()
+    ->step(FetchRemoteData::class)
+    ->step(ParseOptionalSection::class) // peut échouer, sera sauté
+    ->step(PersistResults::class)
+    ->onFailure(FailStrategy::SkipAndContinue)
+    ->send(new ImportContext)
+    ->run();
+```
+
+#### Deux façons d'écrire un job de compensation
+
+**Avec le trait (forme identique à une étape normale).** L'approche historique : le manifest est injecté via le trait `InteractsWithPipeline`, puis `handle()` est implémenté.
+
+```php
+use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
+
 class RefundCustomer
 {
-    public PipelineManifest $pipelineManifest;
+    use InteractsWithPipeline;
 
     public function handle(PaymentService $payments): void
     {
-        $context = $this->pipelineManifest->context;
+        $context = $this->pipelineContext();
         $payments->refund($context->invoice);
+
+        // Optionnel : inspecter pourquoi le pipeline a échoué
+        $failure = $this->failureContext();
+        if ($failure !== null) {
+            logger()->info("Compensation déclenchée après {$failure->failedStepClass}");
+        }
     }
 }
 ```
 
-Si un job de compensation lève lui même une exception, elle est absorbée (loguée mais pas relancée). Les jobs de compensation restants continuent de s'exécuter. Cela garantit qu'un échec dans une étape de rollback n'empêche pas les autres rollbacks de s'exécuter.
+**Avec le contrat (recommandé pour le code neuf).** Implémentez l'interface `CompensableJob`. L'exécuteur invoque `compensate()` avec le contexte et, optionnellement, un snapshot `FailureContext`.
+
+```php
+use Vherbaut\LaravelPipelineJobs\Context\FailureContext;
+use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\Contracts\CompensableJob;
+
+class RefundCustomer implements CompensableJob
+{
+    public function __construct(private PaymentService $payments) {}
+
+    public function compensate(PipelineContext $context, ?FailureContext $failure = null): void
+    {
+        $this->payments->refund($context->invoice);
+    }
+}
+```
+
+Les implémentations peuvent conserver la signature à un seul argument (`compensate(PipelineContext $context)`) ; l'exécuteur inspecte la signature via la réflexion et ne passe le `FailureContext` qu'aux implémentations qui élargissent à deux paramètres.
+
+#### Inspecter l'échec
+
+`FailureContext` est un value object readonly qui expose :
+
+| Propriété | Type | Description |
+|-----------|------|-------------|
+| `failedStepClass` | `string` | FQCN de l'étape qui a levé. |
+| `failedStepIndex` | `int` | Index (base zéro) de l'étape fautive. |
+| `exception` | `?\Throwable` | L'exception d'origine (non null en sync, toujours null en queued selon NFR19, car `Throwable` est exclu du payload sérialisé). |
+
+On y accède depuis n'importe quel job de compensation :
+
+- **Jobs contract based** : second argument optionnel de `compensate()`.
+- **Jobs trait based** : `$this->failureContext()` à l'intérieur de `handle()`.
+
+#### Observabilité en cas d'échec de compensation
+
+Quand un job de compensation lève lui même :
+
+- Pipelines synchrones : un `Log::error('Pipeline compensation failed', [...])` est émis et l'event `Vherbaut\LaravelPipelineJobs\Events\CompensationFailed` est dispatché. L'exception de la compensation est absorbée pour que les compensations restantes continuent (sémantique best effort).
+- Pipelines en file : le wrapper atterrit dans `failed_jobs` avec l'enregistrement Laravel standard. Après épuisement des tentatives (`$tries = 1`), le hook `failed()` émet un `Log::error('Pipeline compensation failed after retries', [...])` et dispatche le même event `CompensationFailed`. Le `Bus::chain` s'arrête sur la première compensation qui lève (divergence documentée avec le best effort synchrone).
+
+L'event `CompensationFailed` est émis **inconditionnellement**, indépendamment de tout opt in à d'autres events pipeline. Il est conçu pour l'alerting opérationnel :
+
+```php
+use Vherbaut\LaravelPipelineJobs\Events\CompensationFailed as CompensationFailedEvent;
+
+Event::listen(CompensationFailedEvent::class, function (CompensationFailedEvent $event): void {
+    // $event->pipelineId
+    // $event->compensationClass
+    // $event->failedStepClass (nullable, string en production)
+    // $event->originalException (null en queued, Throwable en sync)
+    // $event->compensationException (Throwable, toujours non null)
+    Sentry::captureMessage("Rollback échoué : {$event->compensationClass}");
+});
+```
+
+> La classe d'exception `Vherbaut\LaravelPipelineJobs\Exceptions\CompensationFailed` partage son basename avec l'event. Quand les deux sont importés dans le même fichier, utilisez un alias : `use Vherbaut\LaravelPipelineJobs\Events\CompensationFailed as CompensationFailedEvent;`.
 
 ## Tests
 
@@ -765,6 +866,7 @@ it('compense les étapes complétées en cas d\'échec', function () {
 | `when(Closure $condition, string $jobClass)` | `static` | Ajouter une étape qui ne s'exécute que si la condition (évaluée contre le contexte en direct) retourne une valeur vraie. La condition doit être sérialisable en mode queue. |
 | `unless(Closure $condition, string $jobClass)` | `static` | Ajouter une étape qui ne s'exécute que si la condition (évaluée contre le contexte en direct) retourne une valeur fausse. La condition doit être sérialisable en mode queue. |
 | `compensateWith(string $jobClass)` | `static` | Assigner un job de compensation à la dernière étape ajoutée. |
+| `onFailure(FailStrategy $strategy)` | `static` | Définir la stratégie d'échec du pipeline (`StopImmediately` défaut, `StopAndCompensate`, `SkipAndContinue`). |
 | `send(PipelineContext\|Closure $context)` | `static` | Définir le contexte (instance ou closure pour résolution différée). |
 | `shouldBeQueued()` | `static` | Marquer le pipeline pour une exécution asynchrone en file d'attente. |
 | `return(Closure $callback)` | `static` | Enregistrer une closure qui transforme le contexte final en la valeur retournée par `run()`. Synchrone uniquement. Ignorée en mode queue. |
@@ -779,6 +881,37 @@ it('compense les étapes complétées en cas d\'échec', function () {
 |---------|--------|-------------|
 | `pipelineContext()` | `?PipelineContext` | Le `PipelineContext` en direct quand le job s'exécute dans un pipeline avec un contexte, `null` sinon. |
 | `hasPipelineContext()` | `bool` | `true` quand un contexte non null est disponible, `false` pour un dispatch standalone ou un pipeline sans `->send(...)`. |
+| `failureContext()` | `?FailureContext` | Snapshot du dernier échec enregistré sur le manifest, ou `null` si aucun échec n'a été enregistré ou si le job s'exécute en dehors d'un pipeline. Accesseur parallèle à `pipelineContext()`. |
+
+### Contrat `CompensableJob`
+
+Interface optionnelle que les jobs de compensation peuvent implémenter en alternative au pattern trait `InteractsWithPipeline`.
+
+| Méthode | Retour | Description |
+|---------|--------|-------------|
+| `compensate(PipelineContext $context, ?FailureContext $failure = null)` | `void` | Hook de rollback invoqué par l'exécuteur. Le second argument n'est fourni que si l'implémentation élargit la signature à deux paramètres (détection par réflexion). |
+
+### `FailureContext`
+
+Value object readonly construit depuis le manifest au moment de l'invocation.
+
+| Propriété | Type | Description |
+|-----------|------|-------------|
+| `failedStepClass` | `string` | FQCN de l'étape fautive. |
+| `failedStepIndex` | `int` | Index (base zéro) de l'étape fautive. |
+| `exception` | `?\Throwable` | Throwable d'origine (non null en sync, toujours null en queued selon NFR19). |
+
+| Méthode | Retour | Description |
+|---------|--------|-------------|
+| `FailureContext::fromManifest(PipelineManifest $manifest)` | `?self` | Construire un snapshot depuis le manifest, ou `null` si aucun échec n'a été enregistré (`failedStepClass === null`). |
+
+### Enum `FailStrategy`
+
+| Cas | Signification |
+|-----|---------------|
+| `StopImmediately` | Défaut. Relance sous forme de `StepExecutionFailed`, aucune compensation. |
+| `StopAndCompensate` | Exécute la chaîne de compensation en ordre inverse, puis relance `StepExecutionFailed`. |
+| `SkipAndContinue` | Logue un avertissement, saute l'étape, continue. Aucune compensation. Ne lève pas. |
 
 ### `PipelineContext`
 
@@ -796,6 +929,10 @@ it('compense les étapes complétées en cas d\'échec', function () {
 | `currentStepIndex` | `int` | Index de l'étape en cours d'exécution. |
 | `completedSteps` | `array<int, string>` | Étapes qui ont été complétées avec succès. |
 | `context` | `?PipelineContext` | L'objet contexte partagé. |
+| `failStrategy` | `FailStrategy` | Stratégie d'échec du pipeline définie via `onFailure()`. |
+| `failedStepClass` | `?string` | Nom de classe de la dernière étape fautive, ou `null` si aucun échec n'a été enregistré. |
+| `failedStepIndex` | `?int` | Index (base zéro) de la dernière étape fautive, ou `null`. |
+| `failureException` | `?\Throwable` | Throwable vivant de la dernière erreur (null après la frontière de sérialisation queue selon NFR19). |
 
 ### Facade `Pipeline`
 
@@ -812,13 +949,20 @@ La facade `Pipeline` sert de proxy vers `JobPipeline` et ajoute la méthode `fak
 | `InvalidPipelineDefinition` | Le pipeline n'a aucune étape, ou `compensateWith()` est appelé avant toute étape. |
 | `StepExecutionFailed` | Une étape a levé une exception durant l'exécution synchrone. Encapsule l'exception originale. |
 | `ContextSerializationFailed` | Le contexte contient des propriétés non sérialisables (closures, ressources, classes anonymes). |
+| `CompensationFailed` | Classe d'exception de base pour les échecs de rollback. Disponible pour le code utilisateur qui souhaite lever une exception typée depuis un job de compensation. |
+
+### Events
+
+| Event | Quand |
+|-------|-------|
+| `Vherbaut\LaravelPipelineJobs\Events\CompensationFailed` | Dispatché inconditionnellement quand un job de compensation lève (catch best effort en sync, hook `failed()` en queued). Porte `pipelineId`, `compensationClass`, `failedStepClass`, `originalException` (null en queued), `compensationException`. |
 
 ## Feuille de route
 
 Les fonctionnalités suivantes sont prévues pour les prochaines versions. Les propriétés correspondantes sont déjà réservées dans le code :
 
 - **Configuration de queue par étape.** Définir le nom de la queue, la connexion, le nombre de retries, le backoff et le timeout par étape.
-- **Hooks de cycle de vie du pipeline.** `beforeEach()`, `afterEach()`, `onStepFailed()`, `onSuccess()`, `onFailure()`, `onComplete()`.
+- **Hooks de cycle de vie du pipeline.** `beforeEach()`, `afterEach()`, `onStepFailed()`, `onSuccess()`, `onComplete()`, plus un callback d'échec basé sur closure (surcharge de `onFailure(Closure)` ou nouveau nom pour éviter la collision avec le setter de stratégie `onFailure(FailStrategy)` déjà livré).
 - **Pipelines nommés.** `name('order-fulfillment')` pour une meilleure observabilité et traçabilité.
 - **Étapes parallèles.** Pattern fan out pour les étapes qui peuvent s'exécuter simultanément.
 - **Événements de pipeline.** Émettre des événements Laravel aux points clés du cycle de vie.
