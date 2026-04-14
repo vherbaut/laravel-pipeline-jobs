@@ -2,8 +2,11 @@
 
 declare(strict_types=1);
 
+use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+use Vherbaut\LaravelPipelineJobs\Execution\PipelineStepJob;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
@@ -184,16 +187,16 @@ it('serializes hook closures across an explicit serialize/unserialize roundtrip 
 
     $definition = $builder->build();
 
-    $manifest = \Vherbaut\LaravelPipelineJobs\Context\PipelineManifest::create(
+    $manifest = PipelineManifest::create(
         stepClasses: [TrackExecutionJobA::class],
         context: new SimpleContext,
     );
     $manifest->beforeEachHooks = array_map(
-        static fn ($hook) => new \Laravel\SerializableClosure\SerializableClosure($hook),
+        static fn ($hook) => new SerializableClosure($hook),
         $definition->beforeEachHooks,
     );
 
-    $job = new \Vherbaut\LaravelPipelineJobs\Execution\PipelineStepJob($manifest);
+    $job = new PipelineStepJob($manifest);
     $restored = unserialize(serialize($job));
 
     $restored->handle();

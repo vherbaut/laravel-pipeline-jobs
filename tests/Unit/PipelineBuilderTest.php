@@ -9,9 +9,12 @@ use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobC;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
 
 it('creates a builder with correct step count from job class array', function () {
     $builder = new PipelineBuilder([FakeJobA::class, FakeJobB::class, FakeJobC::class]);
@@ -495,11 +498,11 @@ it('captures hooks eagerly in toListener() so later builder mutations do not ble
     // the builder after toListener() returns MUST NOT affect the listener.
     // TrackExecutionJobA is used here because it has a real handle() that
     // the listener can invoke synchronously (sync driver is the test default).
-    \Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob::$executionOrder = [];
+    TrackExecutionJob::$executionOrder = [];
     $calls = [];
 
-    $builder = (new PipelineBuilder([\Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA::class]))
-        ->send(new \Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext)
+    $builder = (new PipelineBuilder([TrackExecutionJobA::class]))
+        ->send(new SimpleContext)
         ->beforeEach(function () use (&$calls): void {
             $calls[] = 'captured-at-toListener-time';
         });
@@ -511,7 +514,7 @@ it('captures hooks eagerly in toListener() so later builder mutations do not ble
         $calls[] = 'registered-after-toListener';
     });
 
-    $listener(new \stdClass);
+    $listener(new stdClass);
 
     expect($calls)->toBe(['captured-at-toListener-time']);
 });

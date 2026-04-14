@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
@@ -280,9 +281,9 @@ it('treats a throwing afterEach as a step failure and does not markStepCompleted
     // executedSteps. A throwing afterEach must leave executedSteps empty
     // for the current step, proving AC #6 load-bearing semantic: the step
     // was NOT marked completed even though handle() ran.
-    \Vherbaut\LaravelPipelineJobs\Facades\Pipeline::fake()->recording();
+    Pipeline::fake()->recording();
 
-    \Vherbaut\LaravelPipelineJobs\Facades\Pipeline::make([TrackExecutionJobA::class])
+    Pipeline::make([TrackExecutionJobA::class])
         ->afterEach(function (): void {
             throw new RuntimeException('after-boom');
         })
@@ -292,7 +293,7 @@ it('treats a throwing afterEach as a step failure and does not markStepCompleted
         ->send(new SimpleContext)
         ->run();
 
-    $recorded = \Vherbaut\LaravelPipelineJobs\Facades\Pipeline::recordedPipelines()[0] ?? null;
+    $recorded = Pipeline::recordedPipelines()[0] ?? null;
 
     expect($caughtExceptions)->toBe(['after-boom'])
         ->and(TrackExecutionJob::$executionOrder)->toBe([TrackExecutionJobA::class]) // handle() did run
