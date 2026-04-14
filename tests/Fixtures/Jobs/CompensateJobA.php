@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs;
 
+use Closure;
 use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 
@@ -27,6 +28,15 @@ final class CompensateJobA
     public static ?string $observedName = null;
 
     /**
+     * Optional callback fired inside handle() so tests can observe the
+     * compensation invocation moment (e.g., to assert hook-vs-compensation
+     * ordering). Reset to null between tests that register it.
+     *
+     * @var Closure|null
+     */
+    public static ?Closure $onHandle = null;
+
+    /**
      * Append this compensation class to the shared $executed log and
      * capture the pipeline context's $name for compensation-path trait
      * assertions.
@@ -41,6 +51,10 @@ final class CompensateJobA
 
         if ($context instanceof SimpleContext) {
             self::$observedName = $context->name;
+        }
+
+        if (self::$onHandle !== null) {
+            (self::$onHandle)();
         }
     }
 }

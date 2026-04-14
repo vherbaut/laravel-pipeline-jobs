@@ -197,6 +197,65 @@ final class FakePipelineBuilder
     }
 
     /**
+     * Register a closure invoked before each non-skipped step executes.
+     *
+     * Delegates to the underlying PipelineBuilder so registered hooks are
+     * carried on the built PipelineDefinition and observable via the
+     * recorded pipeline in Pipeline::fake() mode. Hooks only fire when the
+     * pipeline actually executes: Pipeline::fake()->recording() runs steps
+     * through RecordingExecutor which fires hooks identically to
+     * SyncExecutor, while Pipeline::fake() default (non-recording) mode
+     * records the definition without executing steps, so no hooks fire
+     * (step-granular hooks require step execution).
+     *
+     * Append-semantic like PipelineBuilder::beforeEach(); multiple
+     * registrations accumulate in registration order.
+     *
+     * @param Closure(StepDefinition, ?PipelineContext): void $hook Closure invoked before each non-skipped step.
+     * @return static
+     */
+    public function beforeEach(Closure $hook): static
+    {
+        $this->builder->beforeEach($hook);
+
+        return $this;
+    }
+
+    /**
+     * Register a closure invoked after each successful step.
+     *
+     * Delegates to the underlying PipelineBuilder. Same recording-mode
+     * semantics as beforeEach().
+     *
+     * @param Closure(StepDefinition, ?PipelineContext): void $hook Closure invoked after each successful step.
+     * @return static
+     */
+    public function afterEach(Closure $hook): static
+    {
+        $this->builder->afterEach($hook);
+
+        return $this;
+    }
+
+    /**
+     * Register a closure invoked when a step (or another hook) throws.
+     *
+     * Delegates to the underlying PipelineBuilder. Same recording-mode
+     * semantics as beforeEach(). Distinct from onFailure(FailStrategy):
+     * onStepFailed() is an append-semantic observability hook,
+     * onFailure(FailStrategy) is a last-write-wins strategy setter.
+     *
+     * @param Closure(StepDefinition, ?PipelineContext, \Throwable): void $hook Closure invoked on step failure.
+     * @return static
+     */
+    public function onStepFailed(Closure $hook): static
+    {
+        $this->builder->onStepFailed($hook);
+
+        return $this;
+    }
+
+    /**
      * Build an immutable PipelineDefinition from the accumulated steps.
      *
      * @return PipelineDefinition The immutable pipeline description.
@@ -324,6 +383,21 @@ final class FakePipelineBuilder
             compensationMapping: $definition->compensationMapping(),
             stepConditions: $stepConditions,
             failStrategy: $definition->failStrategy,
+        );
+
+        // Story 6.1: mirror the PipelineBuilder wiring so RecordingExecutor
+        // observes the same hook contract as SyncExecutor (AC #10).
+        $manifest->beforeEachHooks = array_map(
+            static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
+            $definition->beforeEachHooks,
+        );
+        $manifest->afterEachHooks = array_map(
+            static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
+            $definition->afterEachHooks,
+        );
+        $manifest->onStepFailedHooks = array_map(
+            static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
+            $definition->onStepFailedHooks,
         );
 
         $executor = new RecordingExecutor;

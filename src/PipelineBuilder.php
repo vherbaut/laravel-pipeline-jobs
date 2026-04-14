@@ -32,6 +32,15 @@ final class PipelineBuilder
 
     private FailStrategy $failStrategy = FailStrategy::StopImmediately;
 
+    /** @var array<int, Closure> */
+    private array $beforeEachHooks = [];
+
+    /** @var array<int, Closure> */
+    private array $afterEachHooks = [];
+
+    /** @var array<int, Closure> */
+    private array $onStepFailedHooks = [];
+
     /**
      * Create a new pipeline builder.
      *
@@ -257,6 +266,101 @@ final class PipelineBuilder
     }
 
     /**
+     * Register a closure invoked immediately before each non-skipped step executes.
+     *
+     * Fires after the step's when()/unless() condition resolves to run, after
+     * container resolution, and after manifest injection; runs immediately
+     * before the step's handle() method is called. Receives a minimal
+     * StepDefinition snapshot (produced by StepDefinition::fromJobClass())
+     * whose jobClass matches the currently executing step class, plus the
+     * live PipelineContext (which may be null when no context was sent).
+     *
+     * Append-semantic: calling beforeEach() multiple times registers multiple
+     * observers, all firing in registration order. This contrasts with
+     * send(), shouldBeQueued(), return(), and onFailure() which are
+     * last-write-wins.
+     *
+     * Zero-overhead contract: when no beforeEach hooks are registered, the
+     * executor performs no hook iteration and no SerializableClosure
+     * unwrap (FR37, NFR2). Hooks do NOT fire for steps skipped via
+     * when()/unless() conditions.
+     *
+     * A throwing beforeEach is treated as a step failure: the step's
+     * surrounding try/catch catches the exception, onStepFailed hooks fire
+     * with the hook exception, and the FailStrategy branching then applies.
+     *
+     * Hook closures cross the queue boundary via SerializableClosure when
+     * the pipeline runs queued; non-serializable closures produce the
+     * standard SerializableClosure exception at dispatch time.
+     *
+     * @param Closure(StepDefinition, ?PipelineContext): void $hook Closure invoked before each non-skipped step.
+     * @return static
+     */
+    public function beforeEach(Closure $hook): static
+    {
+        $this->beforeEachHooks[] = $hook;
+
+        return $this;
+    }
+
+    /**
+     * Register a closure invoked after each step's handle() returns successfully.
+     *
+     * Fires after the step's handle() method returns, BEFORE the manifest's
+     * markStepCompleted() and advanceStep() run. Receives the same
+     * StepDefinition snapshot and the live PipelineContext (with any
+     * mutations performed by handle() already visible). Hooks do NOT fire
+     * for steps that threw; the onStepFailed branch applies instead.
+     *
+     * Append-semantic like beforeEach(); multiple registrations fire in
+     * order. A throwing afterEach is treated as a step failure: the step
+     * is NOT marked completed, onStepFailed hooks fire with the hook
+     * exception, and the FailStrategy branching then applies.
+     *
+     * @param Closure(StepDefinition, ?PipelineContext): void $hook Closure invoked after each successful step.
+     * @return static
+     */
+    public function afterEach(Closure $hook): static
+    {
+        $this->afterEachHooks[] = $hook;
+
+        return $this;
+    }
+
+    /**
+     * Register a closure invoked when a step throws (including throws from other hooks).
+     *
+     * Fires inside the step's try/catch block, AFTER the manifest records
+     * failureException / failedStepClass / failedStepIndex, but BEFORE the
+     * FailStrategy branching (StopImmediately / StopAndCompensate /
+     * SkipAndContinue all see onStepFailed fire first). Receives the
+     * StepDefinition snapshot, the live PipelineContext, and the caught
+     * Throwable.
+     *
+     * Distinct from onFailure(FailStrategy): onStepFailed() is an
+     * append-semantic observability HOOK (multi-registration, observes
+     * failures); onFailure(FailStrategy) is a last-write-wins STRATEGY
+     * setter (chooses StopImmediately / StopAndCompensate / SkipAndContinue).
+     * The two are orthogonal and may be used together.
+     *
+     * A throwing onStepFailed hook propagates and bypasses the
+     * FailStrategy branching for the CURRENT failure: no compensation
+     * chain dispatch, no SkipAndContinue advance. The hook exception
+     * replaces the original step exception as the bubbling fault.
+     * Subsequent onStepFailed hooks in the array do NOT fire (the loop
+     * aborts on first throw).
+     *
+     * @param Closure(StepDefinition, ?PipelineContext, \Throwable): void $hook Closure invoked when a step or hook throws.
+     * @return static
+     */
+    public function onStepFailed(Closure $hook): static
+    {
+        $this->onStepFailedHooks[] = $hook;
+
+        return $this;
+    }
+
+    /**
      * Build an immutable PipelineDefinition from the accumulated steps.
      *
      * @return PipelineDefinition The immutable pipeline description ready for execution.
@@ -268,6 +372,9 @@ final class PipelineBuilder
         return new PipelineDefinition(
             steps: $this->steps,
             shouldBeQueued: $this->shouldBeQueued,
+            beforeEachHooks: $this->beforeEachHooks,
+            afterEachHooks: $this->afterEachHooks,
+            onStepFailedHooks: $this->onStepFailedHooks,
             failStrategy: $this->failStrategy,
         );
     }
@@ -307,6 +414,11 @@ final class PipelineBuilder
             stepConditions: $this->buildStepConditions($definition),
             failStrategy: $definition->failStrategy,
         );
+
+        $hookClosures = $this->buildHookSerializableClosures($definition);
+        $manifest->beforeEachHooks = $hookClosures['beforeEach'];
+        $manifest->afterEachHooks = $hookClosures['afterEach'];
+        $manifest->onStepFailedHooks = $hookClosures['onStepFailed'];
 
         if ($definition->shouldBeQueued) {
             // AC #4: queued mode always returns null; return() is sync-only.
@@ -356,8 +468,9 @@ final class PipelineBuilder
         $shouldBeQueued = $this->shouldBeQueued;
 
         $stepConditions = $this->buildStepConditions($definition);
+        $hookClosures = $this->buildHookSerializableClosures($definition);
 
-        return function (object $event) use ($definition, $contextSource, $shouldBeQueued, $stepConditions): void {
+        return function (object $event) use ($definition, $contextSource, $shouldBeQueued, $stepConditions, $hookClosures): void {
             $resolvedContext = $contextSource instanceof Closure
                 ? ($contextSource)($event)
                 : $contextSource;
@@ -374,6 +487,10 @@ final class PipelineBuilder
                 stepConditions: $stepConditions,
                 failStrategy: $definition->failStrategy,
             );
+
+            $manifest->beforeEachHooks = $hookClosures['beforeEach'];
+            $manifest->afterEachHooks = $hookClosures['afterEach'];
+            $manifest->onStepFailedHooks = $hookClosures['onStepFailed'];
 
             if ($shouldBeQueued) {
                 (new QueuedExecutor)->execute($definition, $manifest);
@@ -400,7 +517,9 @@ final class PipelineBuilder
      *
      * Iterates the definition's steps and wraps each non-null condition
      * closure in a SerializableClosure so the manifest survives the queue
-     * serialization boundary.
+     * serialization boundary. Mirrors the hook-wrapping helper
+     * buildHookSerializableClosures() which applies the same pattern to
+     * the three pipeline-level hook arrays.
      *
      * @param PipelineDefinition $definition The built pipeline definition.
      *
@@ -422,5 +541,36 @@ final class PipelineBuilder
         }
 
         return $conditions;
+    }
+
+    /**
+     * Wrap the pipeline's hook closures in SerializableClosure for queue transport.
+     *
+     * Iterates the three hook arrays carried on the PipelineDefinition and
+     * produces a SerializableClosure for each registered Closure so the
+     * resulting manifest can be serialized onto a queue payload. Mirrors
+     * the buildStepConditions() pattern. The returned shape is assigned
+     * directly onto the manifest's three public mutable hook fields.
+     *
+     * @param PipelineDefinition $definition The built pipeline definition carrying the raw Closure arrays.
+     *
+     * @return array{beforeEach: array<int, SerializableClosure>, afterEach: array<int, SerializableClosure>, onStepFailed: array<int, SerializableClosure>} Wrapped hook closures keyed by hook kind.
+     */
+    private function buildHookSerializableClosures(PipelineDefinition $definition): array
+    {
+        return [
+            'beforeEach' => array_map(
+                static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
+                $definition->beforeEachHooks,
+            ),
+            'afterEach' => array_map(
+                static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
+                $definition->afterEachHooks,
+            ),
+            'onStepFailed' => array_map(
+                static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
+                $definition->onStepFailedHooks,
+            ),
+        ];
     }
 }

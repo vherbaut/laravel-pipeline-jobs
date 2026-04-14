@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
+use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderPlacedEvent;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
@@ -11,6 +12,7 @@ use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobC;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\HookRecorder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
@@ -21,6 +23,7 @@ use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobC;
 beforeEach(function (): void {
     TrackExecutionJob::$executionOrder = [];
     ReadContextJob::$readName = null;
+    HookRecorder::reset();
 });
 
 it('fakes a pipeline in a service-like context and asserts dispatch', function (): void {
@@ -182,4 +185,58 @@ it('skips the return closure in recording mode when a step fails and returns nul
 
     Pipeline::assertStepExecuted(IncrementCountJob::class);
     Pipeline::assertStepNotExecuted(FailingJob::class);
+});
+
+// --- Story 6.1: Per-step lifecycle hooks on PipelineFake / FakePipelineBuilder ---
+
+it('fires registered hooks in Pipeline::fake()->recording() mode', function (): void {
+    Pipeline::fake()->recording();
+
+    Pipeline::make([TrackExecutionJobA::class, TrackExecutionJobB::class])
+        ->beforeEach(function (StepDefinition $step): void {
+            HookRecorder::$beforeEach[] = $step->jobClass;
+        })
+        ->afterEach(function (StepDefinition $step): void {
+            HookRecorder::$afterEach[] = $step->jobClass;
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(HookRecorder::$beforeEach)->toBe([TrackExecutionJobA::class, TrackExecutionJobB::class])
+        ->and(HookRecorder::$afterEach)->toBe([TrackExecutionJobA::class, TrackExecutionJobB::class]);
+});
+
+it('does not fire hooks in Pipeline::fake() default mode because no steps run', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([TrackExecutionJobA::class])
+        ->beforeEach(function (StepDefinition $step): void {
+            HookRecorder::$beforeEach[] = $step->jobClass;
+        })
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(HookRecorder::$beforeEach)->toBe([])
+        ->and(TrackExecutionJob::$executionOrder)->toBe([]);
+});
+
+it('exposes beforeEach/afterEach/onStepFailed on FakePipelineBuilder delegating to the underlying builder', function (): void {
+    Pipeline::fake();
+
+    $beforeHook = function (StepDefinition $step) {};
+    $afterHook = function (StepDefinition $step) {};
+    $failedHook = function (StepDefinition $step, $ctx, Throwable $e) {};
+
+    Pipeline::make([TrackExecutionJobA::class])
+        ->beforeEach($beforeHook)
+        ->afterEach($afterHook)
+        ->onStepFailed($failedHook)
+        ->send(new SimpleContext)
+        ->run();
+
+    $recorded = Pipeline::recordedPipelines()[0] ?? null;
+    expect($recorded)->not->toBeNull();
+    expect($recorded->definition->beforeEachHooks)->toBe([$beforeHook])
+        ->and($recorded->definition->afterEachHooks)->toBe([$afterHook])
+        ->and($recorded->definition->onStepFailedHooks)->toBe([$failedHook]);
 });
