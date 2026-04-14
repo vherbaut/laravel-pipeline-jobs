@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 
 it('can be created with step list and initial state', function () {
@@ -103,4 +104,51 @@ it('accepts optional pipeline name', function () {
     );
 
     expect($manifest->pipelineName)->toBe('order-processing');
+});
+
+it('defaults failStrategy to StopImmediately on both constructor and create()', function () {
+    $viaCreate = PipelineManifest::create(stepClasses: ['App\\Jobs\\StepOne']);
+
+    $viaConstructor = new PipelineManifest(
+        pipelineId: 'fake-uuid',
+        pipelineName: null,
+        stepClasses: ['App\\Jobs\\StepOne'],
+        compensationMapping: [],
+        stepConditions: [],
+        currentStepIndex: 0,
+        completedSteps: [],
+        context: null,
+    );
+
+    expect($viaCreate->failStrategy)->toBe(FailStrategy::StopImmediately)
+        ->and($viaConstructor->failStrategy)->toBe(FailStrategy::StopImmediately);
+});
+
+it('stores and exposes the passed failStrategy via create()', function () {
+    $manifest = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\StepOne'],
+        failStrategy: FailStrategy::StopAndCompensate,
+    );
+
+    expect($manifest->failStrategy)->toBe(FailStrategy::StopAndCompensate);
+});
+
+it('round-trips failStrategy through serialization', function () {
+    $manifest = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\StepOne'],
+        failStrategy: FailStrategy::StopAndCompensate,
+    );
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->failStrategy)->toBe(FailStrategy::StopAndCompensate);
+});
+
+it('defaults failureException, failedStepClass, failedStepIndex to null', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\StepOne']);
+
+    expect($manifest->failureException)->toBeNull()
+        ->and($manifest->failedStepClass)->toBeNull()
+        ->and($manifest->failedStepIndex)->toBeNull();
 });

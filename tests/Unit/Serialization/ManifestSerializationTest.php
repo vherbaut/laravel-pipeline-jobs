@@ -85,6 +85,24 @@ it('preserves compensation mapping through serialization round-trip', function (
     expect($restored->compensationMapping)->toBe($mapping);
 });
 
+it('preserves serializable failure-context fields through serialization round-trip', function () {
+    $manifest = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\StepOne', 'App\\Jobs\\StepTwo'],
+    );
+
+    // Throwable is intentionally never serialized onto queue payloads (Story 5.2 Task 2.4),
+    // so we assert only the scalar failure-context fields round-trip cleanly.
+    $manifest->failedStepClass = 'App\\Jobs\\StepTwo';
+    $manifest->failedStepIndex = 1;
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->failedStepClass)->toBe('App\\Jobs\\StepTwo')
+        ->and($restored->failedStepIndex)->toBe(1)
+        ->and($restored->failureException)->toBeNull();
+});
+
 it('preserves PipelineContext through serialization round-trip', function () {
     $context = new SimpleContext;
     $context->name = 'test-pipeline';

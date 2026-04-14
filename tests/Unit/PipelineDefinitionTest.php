@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -33,13 +34,15 @@ it('exposes ordered step list and pipeline config', function () {
         shouldBeQueued: true,
         name: 'order-pipeline',
         onComplete: $onComplete,
+        failStrategy: FailStrategy::SkipAndContinue,
     );
 
     expect($definition->steps)->toHaveCount(3)
         ->and($definition->steps[0]->jobClass)->toBe('App\\Jobs\\First')
         ->and($definition->shouldBeQueued)->toBeTrue()
         ->and($definition->name)->toBe('order-pipeline')
-        ->and($definition->onComplete)->toBe($onComplete);
+        ->and($definition->onComplete)->toBe($onComplete)
+        ->and($definition->failStrategy)->toBe(FailStrategy::SkipAndContinue);
 });
 
 it('is immutable with readonly properties', function () {
@@ -84,5 +87,6 @@ it('defaults hook arrays to empty and callbacks to null', function () {
         ->and($definition->onSuccess)->toBeNull()
         ->and($definition->onFailure)->toBeNull()
         ->and($definition->shouldBeQueued)->toBeFalse()
-        ->and($definition->name)->toBeNull();
+        ->and($definition->name)->toBeNull()
+        ->and($definition->failStrategy)->toBe(FailStrategy::StopImmediately);
 });

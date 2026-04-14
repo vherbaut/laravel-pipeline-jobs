@@ -6,6 +6,8 @@ namespace Vherbaut\LaravelPipelineJobs\Context;
 
 use Illuminate\Support\Str;
 use Laravel\SerializableClosure\SerializableClosure;
+use Throwable;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 
 /**
  * Mutable DTO carrying the execution state of a pipeline run.
@@ -19,6 +21,31 @@ use Laravel\SerializableClosure\SerializableClosure;
 final class PipelineManifest
 {
     /**
+     * The throwable raised by the failed step; null while the pipeline has not failed.
+     *
+     * Never serialized into queue payloads. Used in-process only by the executor
+     * that catches the failure, then cleared to null before dispatching any
+     * downstream jobs so the queue payload stays serializable.
+     *
+     * @var Throwable|null
+     */
+    public ?Throwable $failureException = null;
+
+    /**
+     * The fully qualified class name of the step that failed; null while the pipeline has not failed.
+     *
+     * @var string|null
+     */
+    public ?string $failedStepClass = null;
+
+    /**
+     * The zero-based index of the step that failed; null while the pipeline has not failed.
+     *
+     * @var int|null
+     */
+    public ?int $failedStepIndex = null;
+
+    /**
      * Create a new pipeline manifest.
      *
      * @param string $pipelineId Unique identifier for this pipeline run (UUID).
@@ -29,6 +56,7 @@ final class PipelineManifest
      * @param int $currentStepIndex Index of the current step being executed.
      * @param array<int, string> $completedSteps List of completed step class names.
      * @param PipelineContext|null $context The user's pipeline context DTO.
+     * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so queued executors can decide whether to trigger compensation after a step failure.
      */
     public function __construct(
         public readonly string $pipelineId,
@@ -43,6 +71,7 @@ final class PipelineManifest
         /** @var array<int, string> */
         public array $completedSteps,
         public ?PipelineContext $context,
+        public FailStrategy $failStrategy = FailStrategy::StopImmediately,
     ) {}
 
     /**
@@ -53,6 +82,7 @@ final class PipelineManifest
      * @param array<string, string> $compensationMapping Map of step class name to compensation class name.
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
      * @param array<int, array{closure: SerializableClosure, negated: bool}> $stepConditions Per-step condition entries keyed by step index.
+     * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so executors can decide whether to trigger compensation after a step failure.
      *
      * @return self
      */
@@ -62,6 +92,7 @@ final class PipelineManifest
         array $compensationMapping = [],
         ?string $pipelineName = null,
         array $stepConditions = [],
+        FailStrategy $failStrategy = FailStrategy::StopImmediately,
     ): self {
         return new self(
             pipelineId: (string) Str::uuid(),
@@ -72,6 +103,7 @@ final class PipelineManifest
             currentStepIndex: 0,
             completedSteps: [],
             context: $context,
+            failStrategy: $failStrategy,
         );
     }
 
@@ -105,5 +137,58 @@ final class PipelineManifest
     public function setContext(PipelineContext $context): void
     {
         $this->context = $context;
+    }
+
+    /**
+     * Produce the serialized payload for queue transport.
+     *
+     * Excludes $failureException by design: Throwable traces hold resources
+     * and closures that are not reliably serializable (NFR19). The invariant
+     * "failureException is in-process only" is enforced here structurally, so
+     * queue payloads cannot leak the exception even if a caller forgets to
+     * null the field before dispatch.
+     *
+     * @return array<string, mixed>
+     */
+    public function __serialize(): array
+    {
+        return [
+            'pipelineId' => $this->pipelineId,
+            'pipelineName' => $this->pipelineName,
+            'stepClasses' => $this->stepClasses,
+            'compensationMapping' => $this->compensationMapping,
+            'stepConditions' => $this->stepConditions,
+            'currentStepIndex' => $this->currentStepIndex,
+            'completedSteps' => $this->completedSteps,
+            'context' => $this->context,
+            'failStrategy' => $this->failStrategy,
+            'failedStepClass' => $this->failedStepClass,
+            'failedStepIndex' => $this->failedStepIndex,
+        ];
+    }
+
+    /**
+     * Restore the manifest state from a deserialized payload.
+     *
+     * Always restores $failureException as null since the property is never
+     * carried across the serialization boundary (see __serialize).
+     *
+     * @param array<string, mixed> $data
+     * @return void
+     */
+    public function __unserialize(array $data): void
+    {
+        $this->pipelineId = $data['pipelineId'];
+        $this->pipelineName = $data['pipelineName'];
+        $this->stepClasses = $data['stepClasses'];
+        $this->compensationMapping = $data['compensationMapping'];
+        $this->stepConditions = $data['stepConditions'];
+        $this->currentStepIndex = $data['currentStepIndex'];
+        $this->completedSteps = $data['completedSteps'];
+        $this->context = $data['context'];
+        $this->failStrategy = $data['failStrategy'];
+        $this->failedStepClass = $data['failedStepClass'] ?? null;
+        $this->failedStepIndex = $data['failedStepIndex'] ?? null;
+        $this->failureException = null;
     }
 }

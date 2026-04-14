@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
@@ -364,4 +365,46 @@ it('accepts a closure whose parameter is typed as ?PipelineContext', function ()
     $result = $builder->return(fn (?PipelineContext $ctx) => $ctx?->name ?? 'fallback');
 
     expect($result)->toBe($builder);
+});
+
+// --- onFailure() ---
+
+it('defaults build()->failStrategy to FailStrategy::StopImmediately when onFailure() is not called', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->build();
+
+    expect($definition->failStrategy)->toBe(FailStrategy::StopImmediately);
+});
+
+it('stores the strategy on the definition via onFailure()', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->onFailure(FailStrategy::StopAndCompensate)
+        ->build();
+
+    expect($definition->failStrategy)->toBe(FailStrategy::StopAndCompensate);
+});
+
+it('returns the same builder instance for fluent chaining from onFailure()', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $result = $builder->onFailure(FailStrategy::SkipAndContinue);
+
+    expect($result)->toBe($builder);
+});
+
+it('applies last-write-wins when onFailure() is called multiple times', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->onFailure(FailStrategy::StopAndCompensate)
+        ->onFailure(FailStrategy::SkipAndContinue)
+        ->build();
+
+    expect($definition->failStrategy)->toBe(FailStrategy::SkipAndContinue);
+});
+
+it('rejects non-FailStrategy arguments via PHP native type check', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    /** @var mixed $badValue */
+    $badValue = 'StopImmediately';
+
+    expect(fn () => $builder->onFailure($badValue))->toThrow(TypeError::class);
 });
