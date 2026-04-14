@@ -11,10 +11,13 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Log;
+use Laravel\SerializableClosure\SerializableClosure;
 use ReflectionProperty;
 use Throwable;
+use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
 /**
  * Internal queued wrapper that executes a single pipeline step and chains the next.
@@ -81,6 +84,20 @@ final class PipelineStepJob implements ShouldQueue
      *   not marked failed. A later successful step clears the recorded
      *   failure fields; a later failure overwrites them.
      *
+     * Per-step lifecycle hooks (Story 6.1) fire synchronously in the
+     * current worker process:
+     *
+     * - beforeEach: fires after the skip check and manifest injection,
+     *   immediately before app()->call([$job, 'handle']).
+     * - afterEach: fires INSIDE the try block, after handle() returns
+     *   successfully, so a throwing afterEach is caught and routed
+     *   through the standard failure path (AC #6 symmetry with SyncExecutor).
+     * - onStepFailed: fires inside the catch block after failure-field
+     *   recording on the manifest and BEFORE FailStrategy branching.
+     *
+     * Hook closures survive queue transport via SerializableClosure
+     * (mirrors the stepConditions pattern).
+     *
      * @return void
      * @throws Throwable When the underlying step throws under StopImmediately or StopAndCompensate.
      */
@@ -112,12 +129,39 @@ final class PipelineStepJob implements ShouldQueue
                 $property->setValue($job, $this->manifest);
             }
 
+            $this->fireHooks(
+                $this->manifest->beforeEachHooks,
+                StepDefinition::fromJobClass($stepClass),
+                $this->manifest->context,
+            );
+
             app()->call([$job, 'handle']);
+
+            // Story 6.1 Task 6.4: afterEach fires INSIDE the try block so a
+            // throwing afterEach is caught by the standard failure path
+            // (symmetric with SyncExecutor per AC #6).
+            $this->fireHooks(
+                $this->manifest->afterEachHooks,
+                StepDefinition::fromJobClass($stepClass),
+                $this->manifest->context,
+            );
         } catch (Throwable $exception) {
             // Last-failure-wins: subsequent failures overwrite the recorded fields.
             $this->manifest->failureException = $exception;
             $this->manifest->failedStepClass = $stepClass;
             $this->manifest->failedStepIndex = $stepIndex;
+
+            // Story 6.1 AC #3/#7/#8/#9: onStepFailed fires BEFORE FailStrategy
+            // branching. A throwing onStepFailed propagates and bypasses the
+            // FailStrategy branching for THIS failure (no compensation dispatch,
+            // no SkipAndContinue advance; Laravel marks the wrapper failed with
+            // the hook exception instead of the original step exception).
+            $this->fireHooks(
+                $this->manifest->onStepFailedHooks,
+                StepDefinition::fromJobClass($stepClass),
+                $this->manifest->context,
+                $exception,
+            );
 
             if ($this->manifest->failStrategy === FailStrategy::SkipAndContinue) {
                 Log::warning('Pipeline step skipped under SkipAndContinue', [
@@ -214,6 +258,39 @@ final class PipelineStepJob implements ShouldQueue
         $shouldRun = $entry['negated'] ? ! $result : $result;
 
         return ! $shouldRun;
+    }
+
+    /**
+     * Invoke a hook array in registration order with the appropriate arguments.
+     *
+     * Unwraps each SerializableClosure and calls it with either
+     * ($step, $context) for beforeEach/afterEach (exception is null) or
+     * ($step, $context, $exception) for onStepFailed. Hook exceptions
+     * propagate on first throw: the loop aborts and subsequent hooks in
+     * the array are NOT invoked (Story 6.1 AC #7 no-silent-swallow).
+     *
+     * Mirrors SyncExecutor::fireHooks() and RecordingExecutor::fireHooks();
+     * intentional three-site duplication per Story 5.2 Design Decision #2.
+     *
+     * @param array<int, SerializableClosure> $hooks Ordered list of wrapped hook closures.
+     * @param StepDefinition $step Minimal snapshot of the currently executing step.
+     * @param PipelineContext|null $context The live pipeline context, or null when no context was sent.
+     * @param Throwable|null $exception The caught throwable for onStepFailed hooks; null for beforeEach/afterEach.
+     * @return void
+     */
+    private function fireHooks(array $hooks, StepDefinition $step, ?PipelineContext $context, ?Throwable $exception = null): void
+    {
+        foreach ($hooks as $hook) {
+            $closure = $hook->getClosure();
+
+            if ($exception === null) {
+                $closure($step, $context);
+
+                continue;
+            }
+
+            $closure($step, $context, $exception);
+        }
     }
 
     /**

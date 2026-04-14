@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 
@@ -101,6 +102,72 @@ it('preserves serializable failure-context fields through serialization round-tr
     expect($restored->failedStepClass)->toBe('App\\Jobs\\StepTwo')
         ->and($restored->failedStepIndex)->toBe(1)
         ->and($restored->failureException)->toBeNull();
+});
+
+it('preserves beforeEach hooks through SerializableClosure round-trip', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+    $manifest->beforeEachHooks = [new SerializableClosure(fn () => 'before-value')];
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->beforeEachHooks)->toHaveCount(1)
+        ->and($restored->beforeEachHooks[0])->toBeInstanceOf(SerializableClosure::class)
+        ->and(($restored->beforeEachHooks[0]->getClosure())())->toBe('before-value');
+});
+
+it('preserves afterEach hooks through SerializableClosure round-trip', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+    $manifest->afterEachHooks = [new SerializableClosure(fn () => 'after-value')];
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->afterEachHooks)->toHaveCount(1)
+        ->and($restored->afterEachHooks[0])->toBeInstanceOf(SerializableClosure::class)
+        ->and(($restored->afterEachHooks[0]->getClosure())())->toBe('after-value');
+});
+
+it('preserves onStepFailed hooks through SerializableClosure round-trip', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+    $manifest->onStepFailedHooks = [new SerializableClosure(fn () => 'failed-value')];
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->onStepFailedHooks)->toHaveCount(1)
+        ->and($restored->onStepFailedHooks[0])->toBeInstanceOf(SerializableClosure::class)
+        ->and(($restored->onStepFailedHooks[0]->getClosure())())->toBe('failed-value');
+});
+
+it('restores empty hook arrays when deserializing a legacy payload without hook keys', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+
+    // Emulate a legacy queue payload from before Story 6.1 (no hook keys).
+    $legacyPayload = [
+        'pipelineId' => $manifest->pipelineId,
+        'pipelineName' => null,
+        'stepClasses' => ['App\\Jobs\\Step'],
+        'compensationMapping' => [],
+        'stepConditions' => [],
+        'currentStepIndex' => 0,
+        'completedSteps' => [],
+        'context' => null,
+        'failStrategy' => $manifest->failStrategy,
+        'failedStepClass' => null,
+        'failedStepIndex' => null,
+    ];
+
+    // PHP allows setting readonly properties inside __unserialize only on a
+    // freshly allocated (uninitialized) instance, matching the codepath used
+    // by unserialize() internally. Use newInstanceWithoutConstructor() to
+    // reach that state without invoking the real constructor.
+    $restored = (new ReflectionClass(PipelineManifest::class))->newInstanceWithoutConstructor();
+    $restored->__unserialize($legacyPayload);
+
+    expect($restored->beforeEachHooks)->toBe([])
+        ->and($restored->afterEachHooks)->toBe([])
+        ->and($restored->onStepFailedHooks)->toBe([]);
 });
 
 it('preserves PipelineContext through serialization round-trip', function () {

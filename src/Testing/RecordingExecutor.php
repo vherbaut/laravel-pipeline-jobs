@@ -6,6 +6,7 @@ namespace Vherbaut\LaravelPipelineJobs\Testing;
 
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
+use Laravel\SerializableClosure\SerializableClosure;
 use LogicException;
 use ReflectionMethod;
 use ReflectionNamedType;
@@ -22,6 +23,7 @@ use Vherbaut\LaravelPipelineJobs\Events\CompensationFailed as CompensationFailed
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\PipelineExecutor;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
 /**
  * Test executor that runs all steps synchronously while capturing
@@ -51,6 +53,14 @@ final class RecordingExecutor implements PipelineExecutor
     /**
      * Execute all steps synchronously, capturing context snapshots after each step.
      *
+     * Mirrors SyncExecutor::execute() behaviorally: fires the three
+     * Story 6.1 lifecycle hooks (beforeEach before handle(), afterEach
+     * after successful handle() and before markStepCompleted(),
+     * onStepFailed inside catch before compensation) so tests using
+     * Pipeline::fake()->recording() observe the same hook contract as
+     * production. Hook side effects precede the snapshot capture so a
+     * recorded context reflects the post-hook state.
+     *
      * @param PipelineDefinition $definition The immutable pipeline description containing steps and configuration.
      * @param PipelineManifest $manifest The mutable execution state carrying context and step progress.
      * @return PipelineContext|null The final pipeline context after execution, or null if no context was set.
@@ -74,7 +84,19 @@ final class RecordingExecutor implements PipelineExecutor
                     $property->setValue($job, $manifest);
                 }
 
+                $this->fireHooks(
+                    $manifest->beforeEachHooks,
+                    StepDefinition::fromJobClass($stepClass),
+                    $manifest->context,
+                );
+
                 app()->call([$job, 'handle']);
+
+                $this->fireHooks(
+                    $manifest->afterEachHooks,
+                    StepDefinition::fromJobClass($stepClass),
+                    $manifest->context,
+                );
 
                 $manifest->markStepCompleted($stepClass);
                 $manifest->advanceStep();
@@ -88,6 +110,26 @@ final class RecordingExecutor implements PipelineExecutor
                 $manifest->failureException = $exception;
                 $manifest->failedStepClass = $stepClass;
                 $manifest->failedStepIndex = $stepIndex;
+
+                // Story 6.1 AC #7: a throwing onStepFailed bypasses the
+                // FailStrategy branching (no compensation) and is wrapped
+                // as StepExecutionFailed to mirror SyncExecutor (AC #10
+                // recording/sync parity).
+                try {
+                    $this->fireHooks(
+                        $manifest->onStepFailedHooks,
+                        StepDefinition::fromJobClass($stepClass),
+                        $manifest->context,
+                        $exception,
+                    );
+                } catch (Throwable $hookException) {
+                    throw StepExecutionFailed::forStep(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $stepClass,
+                        $hookException,
+                    );
+                }
 
                 $this->runCompensation($manifest);
 
@@ -129,6 +171,35 @@ final class RecordingExecutor implements PipelineExecutor
         $shouldRun = $entry['negated'] ? ! $result : $result;
 
         return ! $shouldRun;
+    }
+
+    /**
+     * Invoke a hook array in registration order with the appropriate arguments.
+     *
+     * Mirrors SyncExecutor::fireHooks() and PipelineStepJob::fireHooks() to
+     * preserve recording-mode parity with production behavior (Story 6.1
+     * AC #10). Hook exceptions propagate; the loop aborts on first throw
+     * (Story 6.1 AC #7).
+     *
+     * @param array<int, SerializableClosure> $hooks Ordered list of wrapped hook closures.
+     * @param StepDefinition $step Minimal snapshot of the currently executing step.
+     * @param PipelineContext|null $context The live pipeline context, or null when no context was sent.
+     * @param Throwable|null $exception The caught throwable for onStepFailed hooks; null for beforeEach/afterEach.
+     * @return void
+     */
+    private function fireHooks(array $hooks, StepDefinition $step, ?PipelineContext $context, ?Throwable $exception = null): void
+    {
+        foreach ($hooks as $hook) {
+            $closure = $hook->getClosure();
+
+            if ($exception === null) {
+                $closure($step, $context);
+
+                continue;
+            }
+
+            $closure($step, $context, $exception);
+        }
     }
 
     /**

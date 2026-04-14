@@ -46,6 +46,45 @@ final class PipelineManifest
     public ?int $failedStepIndex = null;
 
     /**
+     * Closures (wrapped in SerializableClosure) invoked before each non-skipped step executes.
+     *
+     * Populated by PipelineBuilder::run() / PipelineBuilder::toListener() after
+     * the manifest is created; defaults to an empty array when the pipeline
+     * registers no beforeEach hooks. Executors unwrap each entry via
+     * `$entry->getClosure()` at invocation time. Mirrors the stepConditions
+     * pattern but scoped to pipeline-level observability rather than
+     * per-step conditional execution.
+     *
+     * @var array<int, SerializableClosure>
+     */
+    public array $beforeEachHooks = [];
+
+    /**
+     * Closures (wrapped in SerializableClosure) invoked after each successful step.
+     *
+     * Populated by PipelineBuilder::run() / PipelineBuilder::toListener() after
+     * the manifest is created; defaults to an empty array when the pipeline
+     * registers no afterEach hooks. Fires AFTER the step's handle() returns
+     * and BEFORE markStepCompleted()/advanceStep().
+     *
+     * @var array<int, SerializableClosure>
+     */
+    public array $afterEachHooks = [];
+
+    /**
+     * Closures (wrapped in SerializableClosure) invoked when a step (or another hook) throws.
+     *
+     * Populated by PipelineBuilder::run() / PipelineBuilder::toListener() after
+     * the manifest is created; defaults to an empty array when the pipeline
+     * registers no onStepFailed hooks. Fires inside the executor's catch
+     * block, AFTER the failure fields are recorded on the manifest, but
+     * BEFORE the FailStrategy branching.
+     *
+     * @var array<int, SerializableClosure>
+     */
+    public array $onStepFailedHooks = [];
+
+    /**
      * Create a new pipeline manifest.
      *
      * @param string $pipelineId Unique identifier for this pipeline run (UUID).
@@ -148,6 +187,11 @@ final class PipelineManifest
      * queue payloads cannot leak the exception even if a caller forgets to
      * null the field before dispatch.
      *
+     * Includes the three hook arrays (beforeEachHooks, afterEachHooks,
+     * onStepFailedHooks). SerializableClosure is the purpose-built
+     * serialization mechanism for closures and survives queue transport
+     * unchanged (unlike raw Throwable).
+     *
      * @return array<string, mixed>
      */
     public function __serialize(): array
@@ -164,6 +208,9 @@ final class PipelineManifest
             'failStrategy' => $this->failStrategy,
             'failedStepClass' => $this->failedStepClass,
             'failedStepIndex' => $this->failedStepIndex,
+            'beforeEachHooks' => $this->beforeEachHooks,
+            'afterEachHooks' => $this->afterEachHooks,
+            'onStepFailedHooks' => $this->onStepFailedHooks,
         ];
     }
 
@@ -171,7 +218,10 @@ final class PipelineManifest
      * Restore the manifest state from a deserialized payload.
      *
      * Always restores $failureException as null since the property is never
-     * carried across the serialization boundary (see __serialize).
+     * carried across the serialization boundary (see __serialize). Hook
+     * arrays default to empty when the payload predates Story 6.1 (legacy
+     * queue payloads in flight during rolling deployment), matching the
+     * defensive ?? pattern used for failedStepClass / failedStepIndex.
      *
      * @param array<string, mixed> $data
      * @return void
@@ -190,5 +240,8 @@ final class PipelineManifest
         $this->failedStepClass = $data['failedStepClass'] ?? null;
         $this->failedStepIndex = $data['failedStepIndex'] ?? null;
         $this->failureException = null;
+        $this->beforeEachHooks = $data['beforeEachHooks'] ?? [];
+        $this->afterEachHooks = $data['afterEachHooks'] ?? [];
+        $this->onStepFailedHooks = $data['onStepFailedHooks'] ?? [];
     }
 }

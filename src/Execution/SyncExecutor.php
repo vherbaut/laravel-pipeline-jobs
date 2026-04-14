@@ -6,6 +6,7 @@ namespace Vherbaut\LaravelPipelineJobs\Execution;
 
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
+use Laravel\SerializableClosure\SerializableClosure;
 use LogicException;
 use ReflectionMethod;
 use ReflectionNamedType;
@@ -21,6 +22,7 @@ use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Events\CompensationFailed as CompensationFailedEvent;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
 /**
  * Synchronous pipeline executor that runs all steps sequentially
@@ -48,6 +50,26 @@ final class SyncExecutor implements PipelineExecutor
      *   pipeline does not throw. Any subsequent successful step clears the
      *   recorded failure fields; a later failure overwrites them.
      *
+     * Per-step lifecycle hooks (Story 6.1) fire at three points:
+     *
+     * - beforeEach: fires after the skip check and manifest injection,
+     *   immediately before the step's handle() is called. Skipped steps
+     *   (when()/unless() returning the exclusion branch) do NOT trigger
+     *   beforeEach.
+     * - afterEach: fires after handle() returns successfully, BEFORE
+     *   markStepCompleted() and advanceStep() run. A throwing afterEach is
+     *   caught by the surrounding try/catch and routed through the standard
+     *   failure path, so the step is NOT marked completed.
+     * - onStepFailed: fires inside the catch block after failure-field
+     *   recording on the manifest and BEFORE FailStrategy branching. A
+     *   throwing onStepFailed propagates and bypasses the FailStrategy
+     *   branching for the current failure (no compensation, no skip).
+     *
+     * Hook exceptions propagate: beforeEach/afterEach throws route through
+     * the standard step-failure path (onStepFailed fires, FailStrategy
+     * applies); onStepFailed throws bypass the FailStrategy for the current
+     * failure.
+     *
      * @param PipelineDefinition $definition The immutable pipeline description containing steps and configuration.
      * @param PipelineManifest $manifest The mutable execution state carrying context and step progress.
      * @return PipelineContext|null The final pipeline context after execution, or null if the pipeline has no context.
@@ -71,7 +93,19 @@ final class SyncExecutor implements PipelineExecutor
                     $property->setValue($job, $manifest);
                 }
 
+                $this->fireHooks(
+                    $manifest->beforeEachHooks,
+                    StepDefinition::fromJobClass($stepClass),
+                    $manifest->context,
+                );
+
                 app()->call([$job, 'handle']);
+
+                $this->fireHooks(
+                    $manifest->afterEachHooks,
+                    StepDefinition::fromJobClass($stepClass),
+                    $manifest->context,
+                );
 
                 $manifest->markStepCompleted($stepClass);
                 $manifest->advanceStep();
@@ -88,6 +122,26 @@ final class SyncExecutor implements PipelineExecutor
                 $manifest->failureException = $exception;
                 $manifest->failedStepClass = $stepClass;
                 $manifest->failedStepIndex = $stepIndex;
+
+                // Story 6.1 AC #3/#7/#8/#9: onStepFailed fires BEFORE FailStrategy
+                // branching. A throwing onStepFailed bypasses the FailStrategy
+                // branching for THIS failure; the hook's exception replaces the
+                // original and is wrapped as StepExecutionFailed in sync mode.
+                try {
+                    $this->fireHooks(
+                        $manifest->onStepFailedHooks,
+                        StepDefinition::fromJobClass($stepClass),
+                        $manifest->context,
+                        $exception,
+                    );
+                } catch (Throwable $hookException) {
+                    throw StepExecutionFailed::forStep(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $stepClass,
+                        $hookException,
+                    );
+                }
 
                 if ($manifest->failStrategy === FailStrategy::SkipAndContinue) {
                     Log::warning('Pipeline step skipped under SkipAndContinue', [
@@ -150,6 +204,44 @@ final class SyncExecutor implements PipelineExecutor
         $shouldRun = $entry['negated'] ? ! $result : $result;
 
         return ! $shouldRun;
+    }
+
+    /**
+     * Invoke a hook array in registration order with the appropriate arguments.
+     *
+     * Unwraps each SerializableClosure via getClosure() and calls it with
+     * either ($step, $context) for beforeEach/afterEach hooks (exception is
+     * null) or ($step, $context, $exception) for onStepFailed hooks.
+     * Hook exceptions propagate on first throw: the loop aborts and
+     * subsequent hooks in the array are NOT invoked. This matches the
+     * Story 6.1 no-silent-swallow contract (AC #6, AC #7).
+     *
+     * Zero-overhead when unused: if $hooks is an empty array, the foreach
+     * body never executes and no SerializableClosure unwrap occurs.
+     *
+     * Duplicated across SyncExecutor, PipelineStepJob, and RecordingExecutor
+     * per Story 5.2 Design Decision #2 (three-site duplication preferred
+     * over a shared helper for readability).
+     *
+     * @param array<int, SerializableClosure> $hooks Ordered list of wrapped hook closures to invoke.
+     * @param StepDefinition $step Minimal snapshot of the currently executing step (jobClass only).
+     * @param PipelineContext|null $context The live pipeline context, or null when no context was sent.
+     * @param Throwable|null $exception The caught throwable when firing onStepFailed hooks; null for beforeEach/afterEach.
+     * @return void
+     */
+    private function fireHooks(array $hooks, StepDefinition $step, ?PipelineContext $context, ?Throwable $exception = null): void
+    {
+        foreach ($hooks as $hook) {
+            $closure = $hook->getClosure();
+
+            if ($exception === null) {
+                $closure($step, $context);
+
+                continue;
+            }
+
+            $closure($step, $context, $exception);
+        }
     }
 
     /**

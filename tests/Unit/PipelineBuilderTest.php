@@ -9,9 +9,12 @@ use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobC;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
 
 it('creates a builder with correct step count from job class array', function () {
     $builder = new PipelineBuilder([FakeJobA::class, FakeJobB::class, FakeJobC::class]);
@@ -407,4 +410,111 @@ it('rejects non-FailStrategy arguments via PHP native type check', function () {
     $badValue = 'StopImmediately';
 
     expect(fn () => $builder->onFailure($badValue))->toThrow(TypeError::class);
+});
+
+// --- Story 6.1: Per-step lifecycle hooks ---
+
+it('registers a beforeEach hook on the builder and propagates it to the built PipelineDefinition', function () {
+    $hook = fn (StepDefinition $step, ?PipelineContext $ctx) => null;
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->beforeEach($hook)
+        ->build();
+
+    expect($definition->beforeEachHooks)->toHaveCount(1)
+        ->and($definition->beforeEachHooks[0])->toBe($hook);
+});
+
+it('registers an afterEach hook on the builder and propagates it to the built PipelineDefinition', function () {
+    $hook = fn (StepDefinition $step, ?PipelineContext $ctx) => null;
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->afterEach($hook)
+        ->build();
+
+    expect($definition->afterEachHooks)->toHaveCount(1)
+        ->and($definition->afterEachHooks[0])->toBe($hook);
+});
+
+it('registers an onStepFailed hook on the builder and propagates it to the built PipelineDefinition', function () {
+    $hook = fn (StepDefinition $step, ?PipelineContext $ctx, Throwable $e) => null;
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->onStepFailed($hook)
+        ->build();
+
+    expect($definition->onStepFailedHooks)->toHaveCount(1)
+        ->and($definition->onStepFailedHooks[0])->toBe($hook);
+});
+
+it('registers multiple hooks per kind in registration order (append-semantic)', function () {
+    $before1 = fn (StepDefinition $s, ?PipelineContext $c) => null;
+    $before2 = fn (StepDefinition $s, ?PipelineContext $c) => null;
+    $after1 = fn (StepDefinition $s, ?PipelineContext $c) => null;
+    $after2 = fn (StepDefinition $s, ?PipelineContext $c) => null;
+    $failed1 = fn (StepDefinition $s, ?PipelineContext $c, Throwable $e) => null;
+    $failed2 = fn (StepDefinition $s, ?PipelineContext $c, Throwable $e) => null;
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->beforeEach($before1)
+        ->beforeEach($before2)
+        ->afterEach($after1)
+        ->afterEach($after2)
+        ->onStepFailed($failed1)
+        ->onStepFailed($failed2)
+        ->build();
+
+    expect($definition->beforeEachHooks)->toBe([$before1, $before2])
+        ->and($definition->afterEachHooks)->toBe([$after1, $after2])
+        ->and($definition->onStepFailedHooks)->toBe([$failed1, $failed2]);
+});
+
+it('returns the same builder instance for fluent chaining from beforeEach()', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $result = $builder->beforeEach(fn (StepDefinition $s, ?PipelineContext $c) => null);
+
+    expect($result)->toBe($builder);
+});
+
+it('returns the same builder instance for fluent chaining from afterEach()', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $result = $builder->afterEach(fn (StepDefinition $s, ?PipelineContext $c) => null);
+
+    expect($result)->toBe($builder);
+});
+
+it('returns the same builder instance for fluent chaining from onStepFailed()', function () {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $result = $builder->onStepFailed(fn (StepDefinition $s, ?PipelineContext $c, Throwable $e) => null);
+
+    expect($result)->toBe($builder);
+});
+
+it('captures hooks eagerly in toListener() so later builder mutations do not bleed into the returned listener', function () {
+    // AC #14: toListener() must resolve its hook set at call time; mutating
+    // the builder after toListener() returns MUST NOT affect the listener.
+    // TrackExecutionJobA is used here because it has a real handle() that
+    // the listener can invoke synchronously (sync driver is the test default).
+    TrackExecutionJob::$executionOrder = [];
+    $calls = [];
+
+    $builder = (new PipelineBuilder([TrackExecutionJobA::class]))
+        ->send(new SimpleContext)
+        ->beforeEach(function () use (&$calls): void {
+            $calls[] = 'captured-at-toListener-time';
+        });
+
+    $listener = $builder->toListener();
+
+    // Mutation AFTER toListener() — must be ignored by $listener.
+    $builder->beforeEach(function () use (&$calls): void {
+        $calls[] = 'registered-after-toListener';
+    });
+
+    $listener(new stdClass);
+
+    expect($calls)->toBe(['captured-at-toListener-time']);
 });

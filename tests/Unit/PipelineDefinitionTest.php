@@ -90,3 +90,20 @@ it('defaults hook arrays to empty and callbacks to null', function () {
         ->and($definition->name)->toBeNull()
         ->and($definition->failStrategy)->toBe(FailStrategy::StopImmediately);
 });
+
+it('stores beforeEach/afterEach/onStepFailed hooks passed at construction', function () {
+    $before = fn () => null;
+    $after = fn () => null;
+    $failed = fn () => null;
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass('App\\Jobs\\Step')],
+        beforeEachHooks: [$before],
+        afterEachHooks: [$after],
+        onStepFailedHooks: [$failed],
+    );
+
+    expect($definition->beforeEachHooks)->toBe([$before])
+        ->and($definition->afterEachHooks)->toBe([$after])
+        ->and($definition->onStepFailedHooks)->toBe([$failed]);
+});
