@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
+use Vherbaut\LaravelPipelineJobs\Context\FailureContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 
@@ -80,4 +81,54 @@ it('returns the same context instance as the manifest carries (no clone)', funct
     $exposed->name = 'mutated-through-accessor';
 
     expect($manifest->context?->name)->toBe('mutated-through-accessor');
+});
+
+it('returns null from failureContext() when no manifest is injected', function (): void {
+    $job = new class
+    {
+        use InteractsWithPipeline;
+    };
+
+    expect($job->failureContext())->toBeNull();
+});
+
+it('returns null from failureContext() when the injected manifest has no failure recorded', function (): void {
+    $job = new class
+    {
+        use InteractsWithPipeline;
+    };
+
+    $manifest = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\Noop'],
+        context: new SimpleContext,
+    );
+
+    $property = new ReflectionProperty($job, 'pipelineManifest');
+    $property->setValue($job, $manifest);
+
+    expect($job->failureContext())->toBeNull();
+});
+
+it('exposes a populated FailureContext when the manifest carries failure metadata', function (): void {
+    $job = new class
+    {
+        use InteractsWithPipeline;
+    };
+
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Foo']);
+    $exception = new RuntimeException('boom');
+
+    $manifest->failedStepClass = 'App\\Jobs\\Foo';
+    $manifest->failedStepIndex = 0;
+    $manifest->failureException = $exception;
+
+    $property = new ReflectionProperty($job, 'pipelineManifest');
+    $property->setValue($job, $manifest);
+
+    $failure = $job->failureContext();
+
+    expect($failure)->toBeInstanceOf(FailureContext::class)
+        ->and($failure?->failedStepClass)->toBe('App\\Jobs\\Foo')
+        ->and($failure?->failedStepIndex)->toBe(0)
+        ->and($failure?->exception)->toBe($exception);
 });

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Vherbaut\LaravelPipelineJobs\Concerns;
 
+use Vherbaut\LaravelPipelineJobs\Context\FailureContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 
@@ -85,5 +86,32 @@ trait InteractsWithPipeline
     public function hasPipelineContext(): bool
     {
         return $this->pipelineManifest?->context !== null;
+    }
+
+    /**
+     * Return a snapshot of the most recent failure recorded on the manifest, or null when none applies.
+     *
+     * Returns `null` when this job runs outside a pipeline OR when no failure
+     * has been recorded on the injected manifest (`failedStepClass === null`).
+     * Otherwise returns a `FailureContext` exposing the failing step class,
+     * its zero-based index in the pipeline, and the Throwable that caused it.
+     *
+     * In queued execution the returned snapshot has `$exception === null` by
+     * design: Throwables are intentionally excluded from serialized queue
+     * payloads (NFR19 / PipelineManifest::__serialize). The `failedStepClass`
+     * and `failedStepIndex` fields survive serialization and remain readable.
+     *
+     * Parallel to `pipelineContext()`: both accessors short-circuit to the
+     * "not in a pipeline" value when no manifest has been injected.
+     *
+     * @return FailureContext|null A snapshot of the failure metadata, or null when no failure has been recorded.
+     */
+    public function failureContext(): ?FailureContext
+    {
+        if ($this->pipelineManifest === null) {
+            return null;
+        }
+
+        return FailureContext::fromManifest($this->pipelineManifest);
     }
 }

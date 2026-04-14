@@ -9,9 +9,20 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
+use LogicException;
+use ReflectionMethod;
+use ReflectionNamedType;
 use ReflectionProperty;
+use ReflectionType;
+use ReflectionUnionType;
+use Throwable;
+use Vherbaut\LaravelPipelineJobs\Context\FailureContext;
+use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Contracts\CompensableJob;
+use Vherbaut\LaravelPipelineJobs\Events\CompensationFailed as CompensationFailedEvent;
 
 /**
  * Internal queued wrapper that invokes a single compensation job on the queue.
@@ -93,7 +104,7 @@ final class CompensationStepJob implements ShouldQueue
         $job = app()->make($this->compensationClass);
 
         if ($job instanceof CompensableJob) {
-            $job->compensate($this->manifest->context);
+            $this->invokeCompensate($job, $this->manifest->context, FailureContext::fromManifest($this->manifest));
 
             return;
         }
@@ -104,5 +115,131 @@ final class CompensationStepJob implements ShouldQueue
         }
 
         app()->call([$job, 'handle']);
+    }
+
+    /**
+     * Invoke a CompensableJob's compensate() method, passing the FailureContext when the implementation accepts it.
+     *
+     * Mirrors SyncExecutor::invokeCompensate(): reflection-based dispatch
+     * that only passes the extra FailureContext argument when the
+     * implementation accepts a FailureContext-compatible second parameter.
+     * Rejects signatures that require more than two parameters. Duplicated
+     * deliberately across the three compensation bridges per Story 5.2 Design
+     * Decision #2.
+     *
+     * @param CompensableJob $job The compensation job instance resolved from the container.
+     * @param PipelineContext|null $context The pipeline context present at the failure point.
+     * @param FailureContext|null $failure The failure-context snapshot, or null when no failure was recorded on the manifest.
+     * @return void
+     *
+     * @throws LogicException When the compensate() signature declares more than two required parameters.
+     */
+    private function invokeCompensate(
+        CompensableJob $job,
+        ?PipelineContext $context,
+        ?FailureContext $failure,
+    ): void {
+        $method = new ReflectionMethod($job, 'compensate');
+
+        if ($method->getNumberOfRequiredParameters() > 2) {
+            throw new LogicException(sprintf(
+                'Compensation class [%s] declares compensate() with more than two required parameters; the executor only provides $context and $failure.',
+                $job::class,
+            ));
+        }
+
+        $args = self::compensateAcceptsFailureContext($method) ? [$context, $failure] : [$context];
+        $method->invoke($job, ...$args);
+    }
+
+    /**
+     * Decide whether a compensate() reflection method accepts a FailureContext as its second argument.
+     *
+     * @param ReflectionMethod $method The reflected compensate() method.
+     * @return bool True when a FailureContext instance can be safely passed as the second argument.
+     */
+    private static function compensateAcceptsFailureContext(ReflectionMethod $method): bool
+    {
+        if ($method->getNumberOfParameters() < 2) {
+            return false;
+        }
+
+        $type = $method->getParameters()[1]->getType();
+
+        if ($type === null) {
+            return true;
+        }
+
+        return self::typeAcceptsFailureContext($type);
+    }
+
+    /**
+     * Recursive type-compatibility probe for compensateAcceptsFailureContext().
+     *
+     * @param ReflectionType $type A reflected parameter type (named, union, or intersection).
+     * @return bool True when a FailureContext instance satisfies the declared type.
+     */
+    private static function typeAcceptsFailureContext(ReflectionType $type): bool
+    {
+        if ($type instanceof ReflectionNamedType) {
+            if ($type->isBuiltin()) {
+                return $type->getName() === 'mixed' || $type->getName() === 'object';
+            }
+
+            $name = $type->getName();
+
+            return $name === FailureContext::class || is_subclass_of(FailureContext::class, $name);
+        }
+
+        if ($type instanceof ReflectionUnionType) {
+            foreach ($type->getTypes() as $inner) {
+                if (self::typeAcceptsFailureContext($inner)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Laravel queue lifecycle hook fired after the wrapper exhausts its tries.
+     *
+     * Because $tries = 1, this method runs immediately after the first throw
+     * from handle(). Emits the NFR6 observability pair: a structured
+     * `Log::error('Pipeline compensation failed after retries', [...])` line
+     * and a `CompensationFailed` event carrying the compensation class, the
+     * original failing step's class, and the compensation exception.
+     *
+     * The `failedStepClass` is forwarded verbatim (possibly null) from the
+     * manifest; event subscribers must handle the null case defensively. In
+     * production the compensation chain only dispatches after a step failure
+     * was recorded, so the field is non-null at this point; the nullable type
+     * protects against tests or manually constructed manifests.
+     *
+     * The original step exception is always null here because the manifest
+     * crosses the queue serialization boundary with Throwables excluded per
+     * NFR19. Operators should treat the compensationException as primary and
+     * correlate with logs emitted by the earlier failed step via pipelineId.
+     *
+     * @param Throwable $exception The compensation throwable captured by Laravel's queue worker.
+     * @return void
+     */
+    public function failed(Throwable $exception): void
+    {
+        Log::error('Pipeline compensation failed after retries', [
+            'pipelineId' => $this->manifest->pipelineId,
+            'compensationClass' => $this->compensationClass,
+            'failedStepClass' => $this->manifest->failedStepClass,
+            'compensationException' => $exception->getMessage(),
+        ]);
+
+        Event::dispatch(new CompensationFailedEvent(
+            pipelineId: $this->manifest->pipelineId,
+            compensationClass: $this->compensationClass,
+            failedStepClass: $this->manifest->failedStepClass,
+            originalException: null,
+            compensationException: $exception,
+        ));
     }
 }

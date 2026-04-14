@@ -67,13 +67,22 @@ final class PipelineStepJob implements ShouldQueue
      * injects the manifest into the step via ReflectionProperty when the
      * target job exposes a pipelineManifest property, and invokes handle()
      * through the container. On success, advances the manifest and dispatches
-     * the next PipelineStepJob. On failure, records failure-context on the
-     * manifest, dispatches the reversed compensation chain when the strategy
-     * is StopAndCompensate, logs pipeline context, and rethrows so Laravel
-     * marks this wrapper job as failed and stops the chain.
+     * the next PipelineStepJob. On failure, records failure context on the
+     * manifest and branches on failStrategy:
+     *
+     * - StopImmediately: logs an error and rethrows so Laravel marks the
+     *   wrapper failed and halts the chain.
+     * - StopAndCompensate: dispatches the reversed compensation chain, logs
+     *   an error, then rethrows to halt the chain.
+     * - SkipAndContinue: logs a warning, advances past the failed step,
+     *   clears the in-process Throwable reference before forward dispatch
+     *   (NFR19 belt-and-suspenders), dispatches the next PipelineStepJob
+     *   when more steps remain, and returns successfully. The wrapper is
+     *   not marked failed. A later successful step clears the recorded
+     *   failure fields; a later failure overwrites them.
      *
      * @return void
-     * @throws Throwable When the underlying step throws; rethrown after logging.
+     * @throws Throwable When the underlying step throws under StopImmediately or StopAndCompensate.
      */
     public function handle(): void
     {
@@ -105,9 +114,48 @@ final class PipelineStepJob implements ShouldQueue
 
             app()->call([$job, 'handle']);
         } catch (Throwable $exception) {
+            // Last-failure-wins: subsequent failures overwrite the recorded fields.
             $this->manifest->failureException = $exception;
             $this->manifest->failedStepClass = $stepClass;
             $this->manifest->failedStepIndex = $stepIndex;
+
+            if ($this->manifest->failStrategy === FailStrategy::SkipAndContinue) {
+                Log::warning('Pipeline step skipped under SkipAndContinue', [
+                    'pipelineId' => $this->manifest->pipelineId,
+                    'stepClass' => $stepClass,
+                    'stepIndex' => $stepIndex,
+                    'exception' => $exception->getMessage(),
+                ]);
+
+                $this->manifest->advanceStep();
+
+                // NFR19: clear the non-serializable Throwable before dispatching
+                // the next wrapper job so the downstream queue payload stays
+                // serializable even outside the structural __serialize guard.
+                $this->manifest->failureException = null;
+
+                if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
+                    try {
+                        dispatch(new self($this->manifest));
+                    } catch (Throwable $dispatchException) {
+                        // If dispatch() itself throws (queue driver unavailable,
+                        // serialization failure), Laravel's default handling lands
+                        // the wrapper in failed_jobs. Log the dispatch-site context
+                        // before rethrow so operators can attribute the failure to
+                        // the dispatch, not to the already-skipped step.
+                        Log::error('Pipeline next-step dispatch failed under SkipAndContinue', [
+                            'pipelineId' => $this->manifest->pipelineId,
+                            'nextStepIndex' => $this->manifest->currentStepIndex,
+                            'skippedStepClass' => $stepClass,
+                            'exception' => $dispatchException->getMessage(),
+                        ]);
+
+                        throw $dispatchException;
+                    }
+                }
+
+                return;
+            }
 
             if ($this->manifest->failStrategy === FailStrategy::StopAndCompensate) {
                 $this->dispatchCompensationChain();
@@ -125,6 +173,14 @@ final class PipelineStepJob implements ShouldQueue
 
         $this->manifest->markStepCompleted($stepClass);
         $this->manifest->advanceStep();
+
+        // AC #6: a successful step under SkipAndContinue clears any failure
+        // recorded by a previously skipped step. No-op under StopImmediately /
+        // StopAndCompensate because those paths never reach this success tail
+        // with failure fields set.
+        $this->manifest->failureException = null;
+        $this->manifest->failedStepClass = null;
+        $this->manifest->failedStepIndex = null;
 
         if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
             dispatch(new self($this->manifest));
