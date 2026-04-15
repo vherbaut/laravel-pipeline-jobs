@@ -337,3 +337,59 @@ it('pipeline-level: recording mode under SkipAndContinue fires onSuccess and onC
 
     expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
 });
+
+it('per-step queue: Pipeline::fake() captures onQueue configuration on the recorded definition', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make()
+        ->step(TrackExecutionJobA::class)->onQueue('heavy')
+        ->shouldBeQueued()
+        ->run();
+
+    $recorded = $fake->recordedPipelines();
+
+    expect($recorded)->toHaveCount(1)
+        ->and($recorded[0]->definition->steps[0]->queue)->toBe('heavy');
+});
+
+it('per-step queue: Pipeline::fake() does NOT execute steps even when sync() and onQueue are configured', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make()
+        ->step(TrackExecutionJobA::class)->onQueue('heavy')->sync()
+        ->shouldBeQueued()
+        ->run();
+
+    // Default fake mode records the definition without dispatching anything
+    // and without running steps inline. The tracker stays empty regardless of
+    // sync() because no execution path is taken.
+    expect(TrackExecutionJob::$executionOrder)->toBeEmpty();
+});
+
+it('per-step queue: FakePipelineBuilder delegates onQueue, onConnection, sync, defaultQueue, and defaultConnection to the underlying PipelineBuilder', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make()
+        ->defaultQueue('background')
+        ->defaultConnection('redis')
+        ->step(TrackExecutionJobA::class)
+        ->onQueue('heavy')
+        ->onConnection('beanstalkd')
+        ->sync()
+        ->step(TrackExecutionJobB::class)
+        ->shouldBeQueued()
+        ->run();
+
+    $recorded = $fake->recordedPipelines();
+    $definition = $recorded[0]->definition;
+
+    // sync() clears queue and connection because dispatch_sync overrides both
+    expect($definition->steps[0]->queue)->toBeNull()
+        ->and($definition->steps[0]->connection)->toBeNull()
+        ->and($definition->steps[0]->sync)->toBeTrue()
+        ->and($definition->steps[1]->queue)->toBeNull()
+        ->and($definition->steps[1]->connection)->toBeNull()
+        ->and($definition->steps[1]->sync)->toBeFalse()
+        ->and($definition->defaultQueue)->toBe('background')
+        ->and($definition->defaultConnection)->toBe('redis');
+});

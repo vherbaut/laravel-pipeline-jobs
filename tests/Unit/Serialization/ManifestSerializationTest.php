@@ -254,3 +254,51 @@ it('preserves PipelineContext through serialization round-trip', function () {
         ->and($restored->context->active)->toBeTrue()
         ->and($restored->context->tags)->toBe(['foo', 'bar']);
 });
+
+it('preserves stepConfigs through serialization round-trip', function () {
+    $stepConfigs = [
+        0 => ['queue' => 'heavy', 'connection' => 'redis', 'sync' => false],
+        1 => ['queue' => null, 'connection' => null, 'sync' => true],
+        2 => ['queue' => 'background', 'connection' => null, 'sync' => false],
+    ];
+
+    $manifest = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\StepOne', 'App\\Jobs\\StepTwo', 'App\\Jobs\\StepThree'],
+        stepConfigs: $stepConfigs,
+    );
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->stepConfigs)->toBe($stepConfigs);
+});
+
+it('defaults stepConfigs to an empty array when deserializing a legacy payload', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+
+    // Legacy payload shape predates Story 7.1 (no stepConfigs key).
+    $legacyPayload = [
+        'pipelineId' => $manifest->pipelineId,
+        'pipelineName' => null,
+        'stepClasses' => ['App\\Jobs\\Step'],
+        'compensationMapping' => [],
+        'stepConditions' => [],
+        'currentStepIndex' => 0,
+        'completedSteps' => [],
+        'context' => null,
+        'failStrategy' => $manifest->failStrategy,
+        'failedStepClass' => null,
+        'failedStepIndex' => null,
+        'beforeEachHooks' => [],
+        'afterEachHooks' => [],
+        'onStepFailedHooks' => [],
+        'onSuccessCallback' => null,
+        'onFailureCallback' => null,
+        'onCompleteCallback' => null,
+    ];
+
+    $restored = (new ReflectionClass(PipelineManifest::class))->newInstanceWithoutConstructor();
+    $restored->__unserialize($legacyPayload);
+
+    expect($restored->stepConfigs)->toBe([]);
+});

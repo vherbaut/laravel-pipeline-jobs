@@ -121,6 +121,100 @@ final class FakePipelineBuilder
     }
 
     /**
+     * Apply the given queue name to the last added step.
+     *
+     * Delegates to PipelineBuilder::onQueue() so the resolved configuration
+     * is captured on the recorded PipelineDefinition for assertion purposes.
+     * In Pipeline::fake() default mode the pipeline does not execute, so
+     * queue routing has no runtime effect. In Pipeline::fake()->recording()
+     * mode, queue routing is inert because RecordingExecutor runs everything
+     * in-process (same inert semantics as SyncExecutor).
+     *
+     * @param string $queue Queue name to route the last step's wrapper dispatch to.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added.
+     */
+    public function onQueue(string $queue): static
+    {
+        $this->builder->onQueue($queue);
+
+        return $this;
+    }
+
+    /**
+     * Apply the given queue connection to the last added step.
+     *
+     * Delegates to PipelineBuilder::onConnection() with the same
+     * fake-mode-inert semantics as onQueue().
+     *
+     * @param string $connection Queue connection name for the last step's wrapper dispatch.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added.
+     */
+    public function onConnection(string $connection): static
+    {
+        $this->builder->onConnection($connection);
+
+        return $this;
+    }
+
+    /**
+     * Force the last added step to run inline in the current PHP process.
+     *
+     * Delegates to PipelineBuilder::sync(). This is NOT the Laravel "sync"
+     * queue driver; it forces inline execution via `dispatch_sync()` when
+     * the pipeline runs queued. Inert in Pipeline::fake() default and
+     * Pipeline::fake()->recording() modes (no actual queue dispatch occurs);
+     * the configuration is captured on the recorded definition for
+     * observability.
+     *
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added.
+     */
+    public function sync(): static
+    {
+        $this->builder->sync();
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default queue for steps without explicit onQueue().
+     *
+     * Delegates to PipelineBuilder::defaultQueue(). Inert in Pipeline::fake()
+     * default and Pipeline::fake()->recording() modes; the value is carried
+     * on the underlying builder for test observability.
+     *
+     * @param string $queue Default queue name applied to steps without an explicit onQueue() override.
+     * @return static
+     */
+    public function defaultQueue(string $queue): static
+    {
+        $this->builder->defaultQueue($queue);
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default queue connection for steps without explicit onConnection().
+     *
+     * Delegates to PipelineBuilder::defaultConnection(). Inert in
+     * Pipeline::fake() default and Pipeline::fake()->recording() modes.
+     *
+     * @param string $connection Default connection name applied to steps without an explicit onConnection() override.
+     * @return static
+     */
+    public function defaultConnection(string $connection): static
+    {
+        $this->builder->defaultConnection($connection);
+
+        return $this;
+    }
+
+    /**
      * Set the context to inject into the pipeline at execution time.
      *
      * @param PipelineContext|Closure $context The context instance or a closure that produces one.
@@ -427,11 +521,11 @@ final class FakePipelineBuilder
             compensationMapping: $definition->compensationMapping(),
             stepConditions: $stepConditions,
             failStrategy: $definition->failStrategy,
+            stepConfigs: PipelineBuilder::resolveStepConfigs($definition),
         );
 
-        // Story 6.1: mirror the PipelineBuilder wiring so RecordingExecutor
-        // observes the same hook contract as SyncExecutor (AC #10).
-        // Also mirrors the Story 6.2 pipeline-level callback wiring.
+        // Mirror the PipelineBuilder wiring so RecordingExecutor observes
+        // the same hook and callback contract as SyncExecutor.
         $manifest->beforeEachHooks = array_map(
             static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
             $definition->beforeEachHooks,

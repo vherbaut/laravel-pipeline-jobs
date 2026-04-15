@@ -2,15 +2,20 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Events\CompensationFailed as CompensationFailedEvent;
 use Vherbaut\LaravelPipelineJobs\Execution\CompensationStepJob;
+use Vherbaut\LaravelPipelineJobs\Execution\PipelineStepJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ContractBasedCompensation;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingCompensationJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
 
 beforeEach(function (): void {
     CompensateJobA::$executed = [];
@@ -129,4 +134,45 @@ it('forwards a null failedStepClass when the manifest has no failure recorded in
         CompensationFailedEvent::class,
         fn (CompensationFailedEvent $event): bool => $event->failedStepClass === null,
     );
+});
+
+it('dispatches the compensation chain on the Laravel default queue regardless of per-step queue config (AC #13 regression guard)', function (): void {
+    // Build a manifest where step 0 already completed, then step 1 fails
+    // with per-step queue config of 'heavy' / 'redis'. The compensation
+    // chain MUST dispatch CompensateJobA on the default queue (queue ===
+    // null on the wrapped jobs), not pick up the failing step's queue.
+    Bus::fake();
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class, FailingJob::class],
+        context: new SimpleContext,
+        compensationMapping: [TrackExecutionJobA::class => CompensateJobA::class],
+        failStrategy: FailStrategy::StopAndCompensate,
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false],
+            1 => ['queue' => 'heavy', 'connection' => 'redis', 'sync' => false],
+        ],
+    );
+
+    // Pre-mark step 0 as completed and advance the index so the next handle()
+    // invocation lands on the failing step.
+    $manifest->markStepCompleted(TrackExecutionJobA::class);
+    $manifest->advanceStep();
+
+    try {
+        (new PipelineStepJob($manifest))->handle();
+    } catch (Throwable) {
+        // FailingJob throws under StopAndCompensate; we expect the rethrow.
+    }
+
+    Bus::assertChained([
+        function (CompensationStepJob $job): bool {
+            // The CompensationStepJob's queue and connection are unset
+            // (default Laravel routing) — the failing step's 'heavy' / 'redis'
+            // override is NOT carried into the compensation chain.
+            return $job->compensationClass === CompensateJobA::class
+                && $job->queue === null
+                && $job->connection === null;
+        },
+    ]);
 });

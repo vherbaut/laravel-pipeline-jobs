@@ -32,6 +32,12 @@ final class PipelineBuilder
 
     private FailStrategy $failStrategy = FailStrategy::StopImmediately;
 
+    /** @var string|null Pipeline-level default queue name; steps without explicit onQueue() inherit this. */
+    private ?string $defaultQueue = null;
+
+    /** @var string|null Pipeline-level default queue connection; steps without explicit onConnection() inherit this. */
+    private ?string $defaultConnection = null;
+
     /** @var array<int, Closure> */
     private array $beforeEachHooks = [];
 
@@ -175,18 +181,149 @@ final class PipelineBuilder
         if ($lastStep->compensationJobClass !== null) {
             throw new InvalidPipelineDefinition('Compensation is already defined for the last step.');
         }
-        $this->steps[] = new StepDefinition(
-            jobClass: $lastStep->jobClass,
-            compensationJobClass: $compensationClass,
-            condition: $lastStep->condition,
-            conditionNegated: $lastStep->conditionNegated,
-            queue: $lastStep->queue,
-            connection: $lastStep->connection,
-            retry: $lastStep->retry,
-            backoff: $lastStep->backoff,
-            timeout: $lastStep->timeout,
-            sync: $lastStep->sync,
-        );
+
+        $this->steps[] = $lastStep->withCompensation($compensationClass);
+
+        return $this;
+    }
+
+    /**
+     * Apply the given queue name to the last added step.
+     *
+     * Replaces the last StepDefinition with a new instance carrying the
+     * queue override. Last-write-wins when called twice on the same step.
+     * For a pipeline-wide default, use defaultQueue() instead.
+     *
+     * @param string $queue Queue name to route the last step's wrapper dispatch to. Must be non-empty.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added or when the queue name is empty.
+     */
+    public function onQueue(string $queue): static
+    {
+        if ($queue === '') {
+            throw new InvalidPipelineDefinition('Queue name passed to onQueue() cannot be empty.');
+        }
+
+        if ($this->steps === []) {
+            throw new InvalidPipelineDefinition(
+                'Cannot call onQueue() on PipelineBuilder before adding a step. Chain onQueue() after step(), or call defaultQueue() for a pipeline-wide default.',
+            );
+        }
+
+        $last = array_pop($this->steps);
+        $this->steps[] = $last->onQueue($queue);
+
+        return $this;
+    }
+
+    /**
+     * Apply the given queue connection to the last added step.
+     *
+     * Replaces the last StepDefinition with a new instance carrying the
+     * connection override. Last-write-wins when called twice on the same
+     * step. For a pipeline-wide default, use defaultConnection() instead.
+     *
+     * @param string $connection Queue connection name to route the last step's wrapper dispatch to. Must be non-empty.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added or when the connection name is empty.
+     */
+    public function onConnection(string $connection): static
+    {
+        if ($connection === '') {
+            throw new InvalidPipelineDefinition('Connection name passed to onConnection() cannot be empty.');
+        }
+
+        if ($this->steps === []) {
+            throw new InvalidPipelineDefinition(
+                'Cannot call onConnection() on PipelineBuilder before adding a step. Chain onConnection() after step(), or call defaultConnection() for a pipeline-wide default.',
+            );
+        }
+
+        $last = array_pop($this->steps);
+        $this->steps[] = $last->onConnection($connection);
+
+        return $this;
+    }
+
+    /**
+     * Force the last added step to run inline in the current PHP process.
+     *
+     * This is NOT the Laravel "sync" queue driver. When the enclosing
+     * pipeline is queued, the step is dispatched via `dispatch_sync()` so
+     * it executes inline in the current worker's process before the next
+     * step is scheduled. Inert in synchronous mode where every step runs
+     * inline regardless of the sync flag. Replaces the last StepDefinition
+     * with a new instance carrying sync=true; queue and connection overrides
+     * on that step are cleared because Laravel's `dispatch_sync()` always
+     * forces the connection to the literal string `'sync'` and the queue
+     * value has no meaning for an inline dispatch.
+     *
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added.
+     */
+    public function sync(): static
+    {
+        if ($this->steps === []) {
+            throw new InvalidPipelineDefinition(
+                'Cannot call sync() on PipelineBuilder before adding a step. Chain sync() after step().',
+            );
+        }
+
+        $last = array_pop($this->steps);
+        $this->steps[] = $last->sync();
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default queue for steps without explicit onQueue().
+     *
+     * Unlike onQueue(), this method is valid to call before any step has
+     * been added because pipeline-level defaults are pipeline-wide. Steps
+     * with explicit onQueue() override the default. Last-write-wins when
+     * called multiple times. Inert when shouldBeQueued() is not set; the
+     * manifest still carries the resolved values for test observability.
+     *
+     * @param string $queue Default queue name applied to steps without an explicit onQueue() override. Must be non-empty.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When the queue name is empty.
+     */
+    public function defaultQueue(string $queue): static
+    {
+        if ($queue === '') {
+            throw new InvalidPipelineDefinition('Queue name passed to defaultQueue() cannot be empty.');
+        }
+
+        $this->defaultQueue = $queue;
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default queue connection for steps without explicit onConnection().
+     *
+     * Unlike onConnection(), this method is valid to call before any step has
+     * been added because pipeline-level defaults are pipeline-wide. Steps
+     * with explicit onConnection() override the default. Last-write-wins
+     * when called multiple times. Inert when shouldBeQueued() is not set;
+     * the manifest still carries the resolved values for test observability.
+     *
+     * @param string $connection Default connection name applied to steps without an explicit onConnection() override. Must be non-empty.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When the connection name is empty.
+     */
+    public function defaultConnection(string $connection): static
+    {
+        if ($connection === '') {
+            throw new InvalidPipelineDefinition('Connection name passed to defaultConnection() cannot be empty.');
+        }
+
+        $this->defaultConnection = $connection;
 
         return $this;
     }
@@ -492,6 +629,8 @@ final class PipelineBuilder
             onSuccess: $this->onSuccessCallback,
             onFailure: $this->onFailureCallback,
             failStrategy: $this->failStrategy,
+            defaultQueue: $this->defaultQueue,
+            defaultConnection: $this->defaultConnection,
         );
     }
 
@@ -523,12 +662,15 @@ final class PipelineBuilder
             $definition->steps,
         );
 
+        $stepConfigs = self::resolveStepConfigs($definition);
+
         $manifest = PipelineManifest::create(
             stepClasses: $stepClasses,
             context: $resolvedContext,
             compensationMapping: $definition->compensationMapping(),
             stepConditions: $this->buildStepConditions($definition),
             failStrategy: $definition->failStrategy,
+            stepConfigs: $stepConfigs,
         );
 
         $hookClosures = $this->buildHookSerializableClosures($definition);
@@ -589,10 +731,11 @@ final class PipelineBuilder
         $shouldBeQueued = $this->shouldBeQueued;
 
         $stepConditions = $this->buildStepConditions($definition);
+        $stepConfigs = self::resolveStepConfigs($definition);
         $hookClosures = $this->buildHookSerializableClosures($definition);
         $callbackClosures = $this->buildCallbackSerializableClosures($definition);
 
-        return function (object $event) use ($definition, $contextSource, $shouldBeQueued, $stepConditions, $hookClosures, $callbackClosures): void {
+        return function (object $event) use ($definition, $contextSource, $shouldBeQueued, $stepConditions, $stepConfigs, $hookClosures, $callbackClosures): void {
             $resolvedContext = $contextSource instanceof Closure
                 ? ($contextSource)($event)
                 : $contextSource;
@@ -608,6 +751,7 @@ final class PipelineBuilder
                 compensationMapping: $definition->compensationMapping(),
                 stepConditions: $stepConditions,
                 failStrategy: $definition->failStrategy,
+                stepConfigs: $stepConfigs,
             );
 
             $manifest->beforeEachHooks = $hookClosures['beforeEach'];
@@ -726,5 +870,38 @@ final class PipelineBuilder
                 ? null
                 : new SerializableClosure($definition->onFailure),
         ];
+    }
+
+    /**
+     * Build the per-step execution configuration for the manifest.
+     *
+     * Iterates the definition's steps and resolves queue / connection / sync
+     * values following the precedence rule `step override > pipeline default
+     * > null`. Sync has no pipeline-level default; the step's own sync flag
+     * is carried verbatim.
+     *
+     * Called once at manifest creation time in run() and toListener() so
+     * executors consume fully-resolved values without re-running precedence
+     * logic at every dispatch point. Reads the pipeline-level defaults from
+     * the definition so external consumers of the definition can reproduce
+     * the same resolution without access to the builder.
+     *
+     * @param PipelineDefinition $definition The built pipeline definition carrying steps and pipeline-level defaults.
+     *
+     * @return array<int, array{queue: ?string, connection: ?string, sync: bool}> Resolved per-step config indexed by step position.
+     */
+    public static function resolveStepConfigs(PipelineDefinition $definition): array
+    {
+        $configs = [];
+
+        foreach ($definition->steps as $index => $step) {
+            $configs[$index] = [
+                'queue' => $step->queue ?? $definition->defaultQueue,
+                'connection' => $step->connection ?? $definition->defaultConnection,
+                'sync' => $step->sync,
+            ];
+        }
+
+        return $configs;
     }
 }

@@ -599,3 +599,190 @@ it('preserves the existing onFailure(FailStrategy) behavior unchanged after the 
     expect($definition->failStrategy)->toBe(FailStrategy::SkipAndContinue)
         ->and($definition->onFailure)->toBeNull();
 });
+
+it('onQueue rebuilds the last step with the queue override', function () {
+    $builder = (new PipelineBuilder([FakeJobA::class]))
+        ->onQueue('heavy');
+
+    $definition = $builder->build();
+
+    expect($definition->steps[0]->queue)->toBe('heavy')
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('onConnection rebuilds the last step with the connection override', function () {
+    $builder = (new PipelineBuilder([FakeJobA::class]))
+        ->onConnection('redis');
+
+    $definition = $builder->build();
+
+    expect($definition->steps[0]->connection)->toBe('redis');
+});
+
+it('sync rebuilds the last step with sync flag set to true', function () {
+    $builder = (new PipelineBuilder([FakeJobA::class]))
+        ->sync();
+
+    $definition = $builder->build();
+
+    expect($definition->steps[0]->sync)->toBeTrue();
+});
+
+it('onQueue throws InvalidPipelineDefinition when called before any step is added', function () {
+    $builder = new PipelineBuilder;
+
+    expect(fn () => $builder->onQueue('heavy'))
+        ->toThrow(InvalidPipelineDefinition::class, 'before adding a step');
+});
+
+it('onConnection throws InvalidPipelineDefinition when called before any step is added', function () {
+    $builder = new PipelineBuilder;
+
+    expect(fn () => $builder->onConnection('redis'))
+        ->toThrow(InvalidPipelineDefinition::class, 'before adding a step');
+});
+
+it('sync throws InvalidPipelineDefinition when called before any step is added', function () {
+    $builder = new PipelineBuilder;
+
+    expect(fn () => $builder->sync())
+        ->toThrow(InvalidPipelineDefinition::class, 'before adding a step');
+});
+
+it('onQueue applies last-write-wins when called twice on the same step', function () {
+    $builder = (new PipelineBuilder([FakeJobA::class]))
+        ->onQueue('first')
+        ->onQueue('second');
+
+    $definition = $builder->build();
+
+    expect($definition->steps[0]->queue)->toBe('second');
+});
+
+it('onQueue only rebuilds the last step when multiple steps exist', function () {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->step(FakeJobB::class)
+        ->onQueue('heavy')
+        ->step(FakeJobC::class);
+
+    $definition = $builder->build();
+
+    expect($definition->steps[0]->queue)->toBeNull()
+        ->and($definition->steps[1]->queue)->toBe('heavy')
+        ->and($definition->steps[2]->queue)->toBeNull();
+});
+
+it('defaultQueue stores the pipeline-level default queue', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->defaultQueue('background')
+        ->build();
+
+    expect($definition->defaultQueue)->toBe('background');
+});
+
+it('defaultConnection stores the pipeline-level default connection', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->defaultConnection('redis')
+        ->build();
+
+    expect($definition->defaultConnection)->toBe('redis');
+});
+
+it('defaultQueue can be called before any step has been added', function () {
+    $definition = (new PipelineBuilder)
+        ->defaultQueue('background')
+        ->step(FakeJobA::class)
+        ->build();
+
+    expect($definition->defaultQueue)->toBe('background');
+});
+
+it('defaultConnection can be called before any step has been added', function () {
+    $definition = (new PipelineBuilder)
+        ->defaultConnection('redis')
+        ->step(FakeJobA::class)
+        ->build();
+
+    expect($definition->defaultConnection)->toBe('redis');
+});
+
+it('defaultQueue applies last-write-wins', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->defaultQueue('first')
+        ->defaultQueue('second')
+        ->build();
+
+    expect($definition->defaultQueue)->toBe('second');
+});
+
+it('resolveStepConfigs resolves step override over pipeline default', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)->onQueue('heavy')
+        ->step(FakeJobB::class)
+        ->defaultQueue('background')
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0])->toBe(['queue' => 'heavy', 'connection' => null, 'sync' => false])
+        ->and($configs[1])->toBe(['queue' => 'background', 'connection' => null, 'sync' => false]);
+});
+
+it('resolveStepConfigs falls through to null when neither step nor pipeline default is set', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0])->toBe(['queue' => null, 'connection' => null, 'sync' => false]);
+});
+
+it('resolveStepConfigs resolves defaultConnection for steps without explicit override', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)->onConnection('beanstalkd')
+        ->step(FakeJobB::class)
+        ->defaultConnection('redis')
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0]['connection'])->toBe('beanstalkd')
+        ->and($configs[1]['connection'])->toBe('redis');
+});
+
+it('resolveStepConfigs carries sync flag from step override without pipeline default', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)->sync()
+        ->step(FakeJobB::class)
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0]['sync'])->toBeTrue()
+        ->and($configs[1]['sync'])->toBeFalse();
+});
+
+it('resolveStepConfigs produces one entry per step (count invariant with stepClasses)', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->step(FakeJobB::class)->onQueue('heavy')
+        ->step(FakeJobC::class)->sync()
+        ->defaultQueue('background')
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs)->toHaveCount(count($definition->steps))
+        ->and(array_keys($configs))->toBe([0, 1, 2]);
+});
+
+it('threads Step::make()->onQueue() through the array API into the resolved step', function () {
+    $builder = new PipelineBuilder([
+        Step::make(FakeJobA::class)->onQueue('heavy'),
+    ]);
+
+    $definition = $builder->build();
+
+    expect($definition->steps[0]->queue)->toBe('heavy')
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class);
+});

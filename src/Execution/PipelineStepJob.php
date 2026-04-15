@@ -36,6 +36,11 @@ use Vherbaut\LaravelPipelineJobs\StepDefinition;
  * reverse order of the completed steps before rethrowing, so each
  * compensation runs on a fresh worker with standard Laravel retry.
  *
+ * Each next-step dispatch consults `stepConfigs[nextIndex]` to select
+ * queue, connection, and sync-vs-async mode via `dispatchNextStep()`. When
+ * the upcoming step is marked sync, the helper calls `dispatch_sync` so the
+ * inline wrapper runs in the current worker's process before `handle()` returns.
+ *
  * @internal
  */
 final class PipelineStepJob implements ShouldQueue
@@ -130,7 +135,7 @@ final class PipelineStepJob implements ShouldQueue
                 $this->manifest->advanceStep();
 
                 if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
-                    dispatch(new self($this->manifest));
+                    $this->dispatchNextStep();
 
                     return;
                 }
@@ -203,7 +208,10 @@ final class PipelineStepJob implements ShouldQueue
 
                 if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
                     try {
-                        dispatch(new self($this->manifest));
+                        // dispatch_sync may also throw here under Story 7.1's
+                        // sync-step branch; the same catch block handles both
+                        // because dispatch_sync surfaces exceptions synchronously.
+                        $this->dispatchNextStep();
                     } catch (Throwable $dispatchException) {
                         // If dispatch() itself throws (queue driver unavailable,
                         // serialization failure), Laravel's default handling lands
@@ -303,7 +311,7 @@ final class PipelineStepJob implements ShouldQueue
         $this->manifest->failedStepIndex = null;
 
         if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
-            dispatch(new self($this->manifest));
+            $this->dispatchNextStep();
 
             return;
         }
@@ -343,6 +351,55 @@ final class PipelineStepJob implements ShouldQueue
         $shouldRun = $entry['negated'] ? ! $result : $result;
 
         return ! $shouldRun;
+    }
+
+    /**
+     * Dispatch the next PipelineStepJob wrapper, applying per-step config.
+     *
+     * Resolves `$this->manifest->stepConfigs[$this->manifest->currentStepIndex]`
+     * which, by the time this helper is called, has been advanced by the
+     * caller to point at the UPCOMING step's config index. Applies the same
+     * three-branch logic as QueuedExecutor::dispatchFirstStep():
+     *
+     * - `sync === true` → `dispatch_sync()`: runs the next wrapper
+     *   synchronously in the current worker's process; `handle()` does not
+     *   return until the inline wrapper fully executes. Exceptions propagate
+     *   synchronously.
+     * - `sync === false` with explicit queue / connection → the job is
+     *   configured via `onQueue()` / `onConnection()` before `dispatch()`
+     *   is called, so the configuration survives any exception raised
+     *   before dispatch is issued.
+     * - `sync === false` with null queue / connection → no-op mutations.
+     *
+     * Factored from three call sites (success tail, conditional-skip tail,
+     * SkipAndContinue tail). The dispatch branching is not a short
+     * one-liner, so factoring reduces maintenance burden when future
+     * stories extend the per-step config surface.
+     *
+     * @return void
+     */
+    private function dispatchNextStep(): void
+    {
+        $config = $this->manifest->stepConfigs[$this->manifest->currentStepIndex]
+            ?? ['queue' => null, 'connection' => null, 'sync' => false];
+
+        if ((bool) $config['sync']) {
+            dispatch_sync(new self($this->manifest));
+
+            return;
+        }
+
+        $job = new self($this->manifest);
+
+        if ($config['queue'] !== null) {
+            $job->onQueue($config['queue']);
+        }
+
+        if ($config['connection'] !== null) {
+            $job->onConnection($config['connection']);
+        }
+
+        dispatch($job);
     }
 
     /**

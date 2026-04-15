@@ -82,3 +82,67 @@ it('skips context validation when the context is null', function (): void {
 
     Bus::assertDispatched(PipelineStepJob::class);
 });
+
+it('applies onQueue when stepConfigs[0] carries a non-null queue', function (): void {
+    Bus::fake();
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass(TrackExecutionJobA::class)],
+        shouldBeQueued: true,
+    );
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class],
+        context: new SimpleContext,
+        stepConfigs: [0 => ['queue' => 'heavy', 'connection' => null, 'sync' => false]],
+    );
+
+    (new QueuedExecutor)->execute($definition, $manifest);
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'heavy',
+    );
+});
+
+it('applies both onQueue and onConnection when stepConfigs[0] carries non-null values', function (): void {
+    Bus::fake();
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass(TrackExecutionJobA::class)],
+        shouldBeQueued: true,
+    );
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class],
+        context: new SimpleContext,
+        stepConfigs: [0 => ['queue' => 'heavy', 'connection' => 'redis', 'sync' => false]],
+    );
+
+    (new QueuedExecutor)->execute($definition, $manifest);
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'heavy'
+            && $job->connection === 'redis',
+    );
+});
+
+it('uses dispatch_sync when stepConfigs[0] marks the first step as sync', function (): void {
+    Bus::fake();
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass(TrackExecutionJobA::class)],
+        shouldBeQueued: true,
+    );
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class],
+        context: new SimpleContext,
+        stepConfigs: [0 => ['queue' => null, 'connection' => null, 'sync' => true]],
+    );
+
+    (new QueuedExecutor)->execute($definition, $manifest);
+
+    Bus::assertDispatchedSync(PipelineStepJob::class);
+});

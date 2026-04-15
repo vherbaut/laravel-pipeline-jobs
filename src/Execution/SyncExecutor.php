@@ -31,6 +31,15 @@ use Vherbaut\LaravelPipelineJobs\StepDefinition;
  * Each step receives the same PipelineManifest (and thus the same
  * PipelineContext instance), so mutations are immediately visible
  * to subsequent steps. Execution stops on first failure.
+ *
+ * Per-step queue, connection, and sync configuration (StepDefinition::$queue,
+ * ::$connection, ::$sync) is INERT in synchronous mode. Every step runs
+ * inline via `app()->call([$job, 'handle'])` regardless of the declared
+ * queue routing. The `stepConfigs` field on the manifest is populated for
+ * parity with queued-mode manifests but is never consulted by this
+ * executor. Consumers that need queue-routed dispatch must call
+ * `->shouldBeQueued()` on the builder so QueuedExecutor and PipelineStepJob
+ * handle routing instead.
  */
 final class SyncExecutor implements PipelineExecutor
 {

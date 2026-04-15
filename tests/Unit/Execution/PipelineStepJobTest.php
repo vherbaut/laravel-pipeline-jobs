@@ -9,7 +9,9 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Log;
+use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Execution\PipelineStepJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
@@ -161,4 +163,93 @@ it('implements ShouldQueue and uses the required Laravel traits', function (): v
         ->toContain(InteractsWithQueue::class)
         ->toContain(Queueable::class)
         ->toContain(SerializesModels::class);
+});
+
+it('dispatchNextStep applies onQueue and onConnection from stepConfigs for the upcoming step', function (): void {
+    Bus::fake();
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class, TrackExecutionJobB::class],
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false],
+            1 => ['queue' => 'heavy', 'connection' => 'redis', 'sync' => false],
+        ],
+    );
+
+    (new PipelineStepJob($manifest))->handle();
+
+    // The first handle() self-dispatches the next wrapper. The manifest has
+    // advanced to index 1 at dispatch time, so dispatchNextStep reads
+    // stepConfigs[1] and applies the heavy / redis overrides.
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'heavy'
+            && $job->connection === 'redis'
+            && $job->manifest->currentStepIndex === 1,
+    );
+});
+
+it('dispatchNextStep uses dispatch_sync when the upcoming step is marked sync', function (): void {
+    Bus::fake();
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class, TrackExecutionJobB::class],
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false],
+            1 => ['queue' => null, 'connection' => null, 'sync' => true],
+        ],
+    );
+
+    (new PipelineStepJob($manifest))->handle();
+
+    Bus::assertDispatchedSync(PipelineStepJob::class);
+});
+
+it('dispatchNextStep applies stepConfigs when the current step is skipped via a when()/unless() condition', function (): void {
+    Bus::fake();
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class, TrackExecutionJobB::class],
+        stepConditions: [
+            0 => [
+                'closure' => new SerializableClosure(fn (): bool => false),
+                'negated' => false,
+            ],
+        ],
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false],
+            1 => ['queue' => 'priority', 'connection' => 'redis', 'sync' => false],
+        ],
+    );
+
+    (new PipelineStepJob($manifest))->handle();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'priority'
+            && $job->connection === 'redis'
+            && $job->manifest->currentStepIndex === 1,
+    );
+});
+
+it('dispatchNextStep applies stepConfigs after a SkipAndContinue recovery', function (): void {
+    Bus::fake();
+    Log::spy();
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [FailingJob::class, TrackExecutionJobB::class],
+        failStrategy: FailStrategy::SkipAndContinue,
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false],
+            1 => ['queue' => 'recovery', 'connection' => null, 'sync' => false],
+        ],
+    );
+
+    (new PipelineStepJob($manifest))->handle();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'recovery'
+            && $job->manifest->currentStepIndex === 1,
+    );
 });

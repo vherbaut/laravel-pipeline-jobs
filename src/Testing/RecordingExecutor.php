@@ -36,6 +36,11 @@ use Vherbaut\LaravelPipelineJobs\StepDefinition;
  *
  * This executor lives in the Testing namespace and is only used when
  * Pipeline::fake()->recording() mode is active.
+ *
+ * Per-step queue, connection, and sync configuration is INERT in recording
+ * mode. Steps run inline in the current process; `stepConfigs` is preserved
+ * on the manifest so future assertion helpers can introspect the declared
+ * routing without mutating execution behavior.
  */
 final class RecordingExecutor implements PipelineExecutor
 {

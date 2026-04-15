@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Bus;
 use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
@@ -485,4 +486,209 @@ it('pipeline-level: queued onSuccess throw wraps as StepExecutionFailed with ori
 
     // onComplete is NOT called when onSuccess throws.
     expect(HookRecorder::$fired)->toBe([]);
+});
+
+// Story 7.1 note: Bus::fake() captures both dispatch() and dispatch_sync()
+// calls, but into separate assertion channels: Bus::assertDispatched() for
+// async and Bus::assertDispatchedSync() for sync. The sync-step tests below
+// rely on Bus::assertDispatchedSync() as the signal that dispatch_sync() was
+// the branch taken by dispatchFirstStep() / dispatchNextStep() (AC #11).
+
+it('per-step queue: dispatches the first step to its configured queue under Bus::fake()', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)->onQueue('heavy')
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'heavy',
+    );
+});
+
+it('per-step queue: first-step dispatch carries stepConfigs[0].queue under Bus::fake', function (): void {
+    // Bus::fake blocks PipelineStepJob::handle(), so the self-dispatch of
+    // subsequent steps never fires here; only the first dispatch is observable.
+    // Subsequent-step routing via dispatchNextStep() is covered by
+    // tests/Unit/Execution/PipelineStepJobTest.php.
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)->onQueue('first-queue')
+        ->step(TrackExecutionJobB::class)->onQueue('second-queue')
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatchedTimes(PipelineStepJob::class, 1);
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'first-queue'
+            && $job->manifest->currentStepIndex === 0,
+    );
+});
+
+it('per-step queue: dispatches with both onQueue and onConnection overrides', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)->onQueue('heavy')->onConnection('redis')
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'heavy'
+            && $job->connection === 'redis',
+    );
+});
+
+it('per-step queue: null queue falls through to Laravel default (no onQueue applied)', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder([TrackExecutionJobA::class]))
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === null
+            && $job->connection === null,
+    );
+});
+
+it('sync step: uses dispatch_sync when first step is marked sync', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)->sync()
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    // Bus::assertDispatchedSync proves dispatch_sync() was the branch taken.
+    // BusFake records sync dispatches in a separate channel from async
+    // dispatches, so this assertion fails if the executor had fallen back
+    // to dispatch() (AC #11).
+    Bus::assertDispatchedSync(PipelineStepJob::class);
+});
+
+it('sync step: dispatches via dispatch_sync without applying onQueue (queue routing is irrelevant for sync)', function (): void {
+    Bus::fake();
+
+    // Even when onQueue is declared alongside sync, dispatchFirstStep() takes
+    // the sync branch and does not invoke onQueue on a PendingDispatch.
+    // Wrapper's $queue property stays null in the captured sync dispatch.
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)->onQueue('heavy')->sync()
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatchedSync(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === null,
+    );
+});
+
+it('sync step: exception propagates synchronously under StopImmediately when first step is sync', function (): void {
+    // The sync step throws; dispatch_sync (via Bus::dispatchSync under
+    // Bus::fake) surfaces the exception into QueuedExecutor::dispatchFirstStep()'s
+    // caller (AC #11). Without Bus::fake the semantics are identical because
+    // dispatch_sync bypasses the queue layer entirely.
+    expect(function (): void {
+        (new PipelineBuilder)
+            ->step(FailingJob::class)->sync()
+            ->send(new SimpleContext)
+            ->shouldBeQueued()
+            ->run();
+    })->toThrow(RuntimeException::class);
+});
+
+it('default queue: step without explicit onQueue inherits pipeline default', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)
+        ->defaultQueue('background')
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'background',
+    );
+});
+
+it('default queue: explicit step-level override wins over pipeline default', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)->onQueue('heavy')
+        ->step(TrackExecutionJobB::class)
+        ->defaultQueue('background')
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    // Only the FIRST wrapper actually dispatches under Bus::fake() (the
+    // second self-dispatch never fires because the first wrapper's handle()
+    // never runs). Assert the first wrapper carries the step-level override.
+    Bus::assertDispatchedTimes(PipelineStepJob::class, 1);
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'heavy',
+    );
+});
+
+it('default queue: absent default preserves Laravel default when no step override is declared', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder([TrackExecutionJobA::class]))
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === null,
+    );
+});
+
+it('default connection: step inherits defaultConnection when no explicit override is declared', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)
+        ->defaultConnection('redis')
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->connection === 'redis',
+    );
+});
+
+it('default queue: declaration order is irrelevant (declared before any step still resolves)', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->defaultQueue('background')
+        ->step(TrackExecutionJobA::class)
+        ->send(new SimpleContext)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'background',
+    );
 });
