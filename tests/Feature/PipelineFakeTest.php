@@ -337,3 +337,188 @@ it('pipeline-level: recording mode under SkipAndContinue fires onSuccess and onC
 
     expect(HookRecorder::$fired)->toBe(['onSuccess', 'onComplete']);
 });
+
+it('per-step queue: Pipeline::fake() captures onQueue configuration on the recorded definition', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make()
+        ->step(TrackExecutionJobA::class)->onQueue('heavy')
+        ->shouldBeQueued()
+        ->run();
+
+    $recorded = $fake->recordedPipelines();
+
+    expect($recorded)->toHaveCount(1)
+        ->and($recorded[0]->definition->steps[0]->queue)->toBe('heavy');
+});
+
+it('per-step queue: Pipeline::fake() does NOT execute steps even when sync() and onQueue are configured', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make()
+        ->step(TrackExecutionJobA::class)->onQueue('heavy')->sync()
+        ->shouldBeQueued()
+        ->run();
+
+    // Default fake mode records the definition without dispatching anything
+    // and without running steps inline. The tracker stays empty regardless of
+    // sync() because no execution path is taken.
+    expect(TrackExecutionJob::$executionOrder)->toBeEmpty();
+});
+
+it('per-step queue: FakePipelineBuilder delegates onQueue, onConnection, sync, defaultQueue, and defaultConnection to the underlying PipelineBuilder', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make()
+        ->defaultQueue('background')
+        ->defaultConnection('redis')
+        ->step(TrackExecutionJobA::class)
+        ->onQueue('heavy')
+        ->onConnection('beanstalkd')
+        ->sync()
+        ->step(TrackExecutionJobB::class)
+        ->shouldBeQueued()
+        ->run();
+
+    $recorded = $fake->recordedPipelines();
+    $definition = $recorded[0]->definition;
+
+    // sync() clears queue and connection because dispatch_sync overrides both
+    expect($definition->steps[0]->queue)->toBeNull()
+        ->and($definition->steps[0]->connection)->toBeNull()
+        ->and($definition->steps[0]->sync)->toBeTrue()
+        ->and($definition->steps[1]->queue)->toBeNull()
+        ->and($definition->steps[1]->connection)->toBeNull()
+        ->and($definition->steps[1]->sync)->toBeFalse()
+        ->and($definition->defaultQueue)->toBe('background')
+        ->and($definition->defaultConnection)->toBe('redis');
+});
+
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingThenSucceedingJob;
+
+it('per-step retry: Pipeline::fake() captures retry/backoff/timeout on the recorded definition', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make()
+        ->step(FakeJobA::class)->retry(3)->backoff(5)->timeout(60)
+        ->shouldBeQueued()
+        ->run();
+
+    $recorded = $fake->recordedPipelines();
+    $definition = $recorded[0]->definition;
+
+    expect($definition->steps[0]->retry)->toBe(3)
+        ->and($definition->steps[0]->backoff)->toBe(5)
+        ->and($definition->steps[0]->timeout)->toBe(60);
+});
+
+it('per-step retry: Pipeline::fake() does NOT invoke handle() even when retry is configured', function (): void {
+    FailingThenSucceedingJob::reset();
+    Pipeline::fake();
+
+    Pipeline::make()
+        ->step(FailingThenSucceedingJob::class)->retry(5)
+        ->run();
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(0);
+});
+
+it('per-step retry: FakePipelineBuilder delegates retry, backoff, timeout, defaultRetry, defaultBackoff, defaultTimeout to the underlying PipelineBuilder', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make()
+        ->defaultRetry(1)
+        ->defaultBackoff(2)
+        ->defaultTimeout(30)
+        ->step(FakeJobA::class)
+        ->retry(3)
+        ->backoff(5)
+        ->timeout(60)
+        ->step(FakeJobB::class)
+        ->shouldBeQueued()
+        ->run();
+
+    $recorded = $fake->recordedPipelines();
+    $definition = $recorded[0]->definition;
+
+    expect($definition->steps[0]->retry)->toBe(3)
+        ->and($definition->steps[0]->backoff)->toBe(5)
+        ->and($definition->steps[0]->timeout)->toBe(60)
+        ->and($definition->steps[1]->retry)->toBeNull()
+        ->and($definition->steps[1]->backoff)->toBeNull()
+        ->and($definition->steps[1]->timeout)->toBeNull()
+        ->and($definition->defaultRetry)->toBe(1)
+        ->and($definition->defaultBackoff)->toBe(2)
+        ->and($definition->defaultTimeout)->toBe(30);
+});
+
+it('per-step retry: Pipeline::fake()->recording() mode runs each step exactly once even when retry is configured', function (): void {
+    FailingThenSucceedingJob::reset();
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 99; // always fails
+
+    Pipeline::fake()->recording();
+
+    try {
+        Pipeline::make()
+            ->step(FailingThenSucceedingJob::class)->retry(3)
+            ->run();
+    } catch (Throwable) {
+        // expected; retry is inert so only the first attempt throws
+    }
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(1);
+});
+
+it('Pipeline::fake()->dispatch() records the pipeline on destruct', function (): void {
+    Pipeline::fake();
+
+    Pipeline::dispatch([TrackExecutionJobA::class, TrackExecutionJobB::class])
+        ->send(new SimpleContext);
+
+    Pipeline::assertPipelineRan();
+    Pipeline::assertPipelineRanWith([TrackExecutionJobA::class, TrackExecutionJobB::class]);
+    expect(TrackExecutionJob::$executionOrder)->toBeEmpty();
+});
+
+it('Pipeline::fake()->recording() with dispatch() executes through RecordingExecutor', function (): void {
+    Pipeline::fake()->recording();
+
+    $ctx = new SimpleContext;
+    $ctx->name = 'recorded';
+
+    Pipeline::dispatch([EnrichContextJob::class, ReadContextJob::class])->send($ctx);
+
+    $capturedAfterEnrich = Pipeline::getContextAfterStep(EnrichContextJob::class);
+    expect($capturedAfterEnrich)->toBeInstanceOf(SimpleContext::class)
+        ->and($capturedAfterEnrich->name)->toBe('enriched');
+});
+
+it('Pipeline::fake()->dispatch() and Pipeline::fake()->make()->run() produce equivalent recorded definitions', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class, FakeJobB::class])->send(new SimpleContext)->run();
+    Pipeline::dispatch([FakeJobA::class, FakeJobB::class])->send(new SimpleContext);
+
+    $recorded = $fake->recordedPipelines();
+    expect($recorded)->toHaveCount(2);
+
+    $makeSteps = array_map(fn ($s) => $s->jobClass, $recorded[0]->definition->steps);
+    $dispatchSteps = array_map(fn ($s) => $s->jobClass, $recorded[1]->definition->steps);
+    expect($makeSteps)->toBe($dispatchSteps)
+        ->and($makeSteps)->toBe([FakeJobA::class, FakeJobB::class]);
+});
+
+it('Pipeline::fake() assertion helpers work against dispatch()-originated pipelines', function (): void {
+    Pipeline::fake()->recording();
+    Pipeline::assertNoPipelinesRan();
+
+    $ctx = new SimpleContext;
+    $ctx->name = 'probe';
+
+    Pipeline::dispatch([TrackExecutionJobA::class])->send($ctx);
+
+    Pipeline::assertPipelineRan();
+    Pipeline::assertPipelineRanTimes(1);
+    Pipeline::assertStepExecuted(TrackExecutionJobA::class);
+    Pipeline::assertContextHas('name', 'probe');
+});

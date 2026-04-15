@@ -121,6 +121,222 @@ final class FakePipelineBuilder
     }
 
     /**
+     * Apply the given queue name to the last added step.
+     *
+     * Delegates to PipelineBuilder::onQueue() so the resolved configuration
+     * is captured on the recorded PipelineDefinition for assertion purposes.
+     * In Pipeline::fake() default mode the pipeline does not execute, so
+     * queue routing has no runtime effect. In Pipeline::fake()->recording()
+     * mode, queue routing is inert because RecordingExecutor runs everything
+     * in-process (same inert semantics as SyncExecutor).
+     *
+     * @param string $queue Queue name to route the last step's wrapper dispatch to.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added.
+     */
+    public function onQueue(string $queue): static
+    {
+        $this->builder->onQueue($queue);
+
+        return $this;
+    }
+
+    /**
+     * Apply the given queue connection to the last added step.
+     *
+     * Delegates to PipelineBuilder::onConnection() with the same
+     * fake-mode-inert semantics as onQueue().
+     *
+     * @param string $connection Queue connection name for the last step's wrapper dispatch.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added.
+     */
+    public function onConnection(string $connection): static
+    {
+        $this->builder->onConnection($connection);
+
+        return $this;
+    }
+
+    /**
+     * Force the last added step to run inline in the current PHP process.
+     *
+     * Delegates to PipelineBuilder::sync(). This is NOT the Laravel "sync"
+     * queue driver; it forces inline execution via `dispatch_sync()` when
+     * the pipeline runs queued. Inert in Pipeline::fake() default and
+     * Pipeline::fake()->recording() modes (no actual queue dispatch occurs);
+     * the configuration is captured on the recorded definition for
+     * observability.
+     *
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added.
+     */
+    public function sync(): static
+    {
+        $this->builder->sync();
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default queue for steps without explicit onQueue().
+     *
+     * Delegates to PipelineBuilder::defaultQueue(). Inert in Pipeline::fake()
+     * default and Pipeline::fake()->recording() modes; the value is carried
+     * on the underlying builder for test observability.
+     *
+     * @param string $queue Default queue name applied to steps without an explicit onQueue() override.
+     * @return static
+     */
+    public function defaultQueue(string $queue): static
+    {
+        $this->builder->defaultQueue($queue);
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default queue connection for steps without explicit onConnection().
+     *
+     * Delegates to PipelineBuilder::defaultConnection(). Inert in
+     * Pipeline::fake() default and Pipeline::fake()->recording() modes.
+     *
+     * @param string $connection Default connection name applied to steps without an explicit onConnection() override.
+     * @return static
+     */
+    public function defaultConnection(string $connection): static
+    {
+        $this->builder->defaultConnection($connection);
+
+        return $this;
+    }
+
+    /**
+     * Apply the given retry count to the last added step.
+     *
+     * Delegates to PipelineBuilder::retry(). In Pipeline::fake() default mode
+     * the pipeline does not execute, so retry has no runtime effect; the
+     * resolved `stepConfigs` is captured on the recorded definition for
+     * assertion purposes. In Pipeline::fake()->recording() mode, retry is
+     * inert because RecordingExecutor runs each step exactly once. The
+     * underlying PipelineBuilder validation guards (no-prior-step + negative
+     * value rejection) remain ACTIVE in fake and recording modes — only the
+     * runtime retry-loop side effect is inert.
+     *
+     * @param int $retry Number of retry attempts after the initial attempt. Must be non-negative.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added or when $retry is negative.
+     */
+    public function retry(int $retry): static
+    {
+        $this->builder->retry($retry);
+
+        return $this;
+    }
+
+    /**
+     * Apply the given backoff delay to the last added step.
+     *
+     * Delegates to PipelineBuilder::backoff() with the same fake-mode-inert
+     * semantics as retry(). Validation guards (no-prior-step + negative
+     * value rejection) remain ACTIVE in fake and recording modes.
+     *
+     * @param int $backoff Seconds to sleep between retry attempts. Must be non-negative.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added or when $backoff is negative.
+     */
+    public function backoff(int $backoff): static
+    {
+        $this->builder->backoff($backoff);
+
+        return $this;
+    }
+
+    /**
+     * Apply the given wrapper timeout to the last added step.
+     *
+     * Delegates to PipelineBuilder::timeout(). Inert in Pipeline::fake()
+     * default and Pipeline::fake()->recording() modes (no actual queue
+     * dispatch occurs); the configuration is captured on the recorded
+     * definition for observability. Validation guards (no-prior-step +
+     * `>= 1` enforcement) remain ACTIVE in fake and recording modes.
+     *
+     * @param int $timeout Maximum execution time in seconds for the queued wrapper. Must be greater than or equal to 1.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added or when $timeout is less than 1.
+     */
+    public function timeout(int $timeout): static
+    {
+        $this->builder->timeout($timeout);
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default retry count for steps without explicit retry().
+     *
+     * Delegates to PipelineBuilder::defaultRetry(). Inert in Pipeline::fake()
+     * default and Pipeline::fake()->recording() modes; the value is carried
+     * on the underlying builder for test observability. The negative-value
+     * validation guard remains ACTIVE in fake and recording modes.
+     *
+     * @param int $retry Default retry attempts applied to steps without an explicit retry() override. Must be non-negative.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $retry is negative.
+     */
+    public function defaultRetry(int $retry): static
+    {
+        $this->builder->defaultRetry($retry);
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default backoff delay for steps without explicit backoff().
+     *
+     * Delegates to PipelineBuilder::defaultBackoff(). Inert in Pipeline::fake()
+     * default and Pipeline::fake()->recording() modes. The negative-value
+     * validation guard remains ACTIVE in fake and recording modes.
+     *
+     * @param int $backoff Default backoff (seconds) applied to steps without an explicit backoff() override. Must be non-negative.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $backoff is negative.
+     */
+    public function defaultBackoff(int $backoff): static
+    {
+        $this->builder->defaultBackoff($backoff);
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default timeout for steps without explicit timeout().
+     *
+     * Delegates to PipelineBuilder::defaultTimeout(). Inert in Pipeline::fake()
+     * default and Pipeline::fake()->recording() modes. The `>= 1` validation
+     * guard remains ACTIVE in fake and recording modes.
+     *
+     * @param int $timeout Default timeout (seconds) applied to steps without an explicit timeout() override. Must be greater than or equal to 1.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $timeout is less than 1.
+     */
+    public function defaultTimeout(int $timeout): static
+    {
+        $this->builder->defaultTimeout($timeout);
+
+        return $this;
+    }
+
+    /**
      * Set the context to inject into the pipeline at execution time.
      *
      * @param PipelineContext|Closure $context The context instance or a closure that produces one.
@@ -427,11 +643,11 @@ final class FakePipelineBuilder
             compensationMapping: $definition->compensationMapping(),
             stepConditions: $stepConditions,
             failStrategy: $definition->failStrategy,
+            stepConfigs: PipelineBuilder::resolveStepConfigs($definition),
         );
 
-        // Story 6.1: mirror the PipelineBuilder wiring so RecordingExecutor
-        // observes the same hook contract as SyncExecutor (AC #10).
-        // Also mirrors the Story 6.2 pipeline-level callback wiring.
+        // Mirror the PipelineBuilder wiring so RecordingExecutor observes
+        // the same hook and callback contract as SyncExecutor.
         $manifest->beforeEachHooks = array_map(
             static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
             $definition->beforeEachHooks,

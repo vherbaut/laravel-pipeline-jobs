@@ -31,6 +31,23 @@ use Vherbaut\LaravelPipelineJobs\StepDefinition;
  * Each step receives the same PipelineManifest (and thus the same
  * PipelineContext instance), so mutations are immediately visible
  * to subsequent steps. Execution stops on first failure.
+ *
+ * Per-step queue, connection, and sync configuration (StepDefinition::$queue,
+ * ::$connection, ::$sync) is INERT in synchronous mode. Every step runs
+ * inline via `app()->call([$job, 'handle'])` regardless of the declared
+ * queue routing. The `stepConfigs` field on the manifest is populated for
+ * parity with queued-mode manifests but is never consulted by this
+ * executor. Consumers that need queue-routed dispatch must call
+ * `->shouldBeQueued()` on the builder so QueuedExecutor and PipelineStepJob
+ * handle routing instead.
+ *
+ * Per-step `retry` and `backoff` are ACTIVE in synchronous mode: the retry
+ * loop runs in-process via `invokeStepWithRetry()` with `sleep($backoff)`
+ * between attempts. Per-step `timeout` is INERT in synchronous mode because
+ * Laravel's native timeout mechanism relies on `pcntl_alarm` inside the
+ * queue worker, which is not part of the synchronous `run()` flow.
+ * Consumers needing a per-step timeout guarantee must declare
+ * `->shouldBeQueued()` so the wrapper's `$timeout` property is honored.
  */
 final class SyncExecutor implements PipelineExecutor
 {
@@ -115,7 +132,10 @@ final class SyncExecutor implements PipelineExecutor
                     $manifest->context,
                 );
 
-                app()->call([$job, 'handle']);
+                $this->invokeStepWithRetry(
+                    $job,
+                    $manifest->stepConfigs[$stepIndex] ?? ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+                );
 
                 $this->fireHooks(
                     $manifest->afterEachHooks,
@@ -239,6 +259,77 @@ final class SyncExecutor implements PipelineExecutor
         $this->firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
 
         return $manifest->context;
+    }
+
+    /**
+     * Invoke the step's handle() method with an in-process retry loop.
+     *
+     * Fast path: when the resolved retry is null or zero, the method calls
+     * `app()->call([$job, 'handle'])` exactly once and returns — zero
+     * retry-loop overhead when retry is unset. Retry path: when retry is a
+     * positive integer, the method enters a loop of at most `retry + 1`
+     * attempts (1 initial + `retry` retries); a successful invocation
+     * returns immediately, a throw on a non-final attempt triggers
+     * `sleep($backoff)` (when backoff > 0) and another attempt, and a throw
+     * on the final attempt propagates to the caller.
+     *
+     * Instance-reuse contract: the step `$job` is resolved ONCE by the
+     * caller (`app()->make($stepClass)`) before this helper runs; the SAME
+     * instance receives every retry attempt. Instance-level state
+     * (counters, accumulators, cached service handles) persists across
+     * attempts. This differs from Laravel's native queue retry which
+     * re-resolves per attempt because it crosses process boundaries; the
+     * in-process retry here stays inside one PHP process and therefore
+     * preserves the instance. Users relying on step-local state (e.g.
+     * circuit breakers, partial-accumulation defense) should expect this
+     * semantic.
+     *
+     * Hooks observe the step as a single logical unit: beforeEach fires
+     * before this method is called, afterEach fires once after this method
+     * returns successfully, and onStepFailed fires once (inside the outer
+     * catch) only when the final attempt throws. Intermediate-attempt
+     * failures do NOT fire onStepFailed.
+     *
+     * The `timeout` key of the config array is intentionally ignored in
+     * synchronous mode; the class-level PHPDoc documents this inertness.
+     *
+     * @param object $job The resolved step job instance (already has manifest injected when applicable).
+     * @param array{retry: ?int, backoff: ?int, timeout: ?int} $config Resolved per-step configuration entry; legacy three-key shapes degrade to no-retry.
+     * @return void
+     *
+     * @throws Throwable The final attempt's exception when the retry loop exhausts.
+     */
+    private function invokeStepWithRetry(object $job, array $config): void
+    {
+        $retry = $config['retry'] ?? null;
+
+        if ($retry === null || $retry === 0) {
+            app()->call([$job, 'handle']);
+
+            return;
+        }
+
+        $backoff = $config['backoff'] ?? 0;
+        $maxAttempts = $retry + 1;
+        $attempt = 0;
+
+        while (true) {
+            $attempt++;
+
+            try {
+                app()->call([$job, 'handle']);
+
+                return;
+            } catch (Throwable $exception) {
+                if ($attempt >= $maxAttempts) {
+                    throw $exception;
+                }
+
+                if ($backoff > 0) {
+                    sleep($backoff);
+                }
+            }
+        }
     }
 
     /**

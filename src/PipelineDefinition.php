@@ -29,7 +29,12 @@ final class PipelineDefinition
      * @param Closure|null $onComplete Closure to run when the pipeline completes (success or failure).
      * @param Closure|null $onSuccess Closure to run when the pipeline completes successfully.
      * @param Closure|null $onFailure Closure to run when the pipeline fails.
-     * @param FailStrategy $failStrategy Saga failure strategy driving executor behavior when a step fails. Consumed by SyncExecutor/QueuedExecutor/RecordingExecutor in Story 5.2.
+     * @param FailStrategy $failStrategy Saga failure strategy driving executor behavior when a step fails.
+     * @param string|null $defaultQueue Pipeline-level default queue name inherited by steps without an explicit onQueue() override.
+     * @param string|null $defaultConnection Pipeline-level default queue connection inherited by steps without an explicit onConnection() override.
+     * @param int|null $defaultRetry Pipeline-level default retry count inherited by steps without an explicit retry() override.
+     * @param int|null $defaultBackoff Pipeline-level default backoff delay (seconds) inherited by steps without an explicit backoff() override.
+     * @param int|null $defaultTimeout Pipeline-level default timeout (seconds) inherited by steps without an explicit timeout() override.
      *
      * @throws InvalidPipelineDefinition When the steps array is empty.
      */
@@ -44,6 +49,11 @@ final class PipelineDefinition
         public readonly ?Closure $onSuccess = null,
         public readonly ?Closure $onFailure = null,
         public readonly FailStrategy $failStrategy = FailStrategy::StopImmediately,
+        public readonly ?string $defaultQueue = null,
+        public readonly ?string $defaultConnection = null,
+        public readonly ?int $defaultRetry = null,
+        public readonly ?int $defaultBackoff = null,
+        public readonly ?int $defaultTimeout = null,
     ) {
         if ($this->steps === []) {
             throw InvalidPipelineDefinition::emptySteps();

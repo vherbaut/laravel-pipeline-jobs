@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Foundation\AliasLoader;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
+use Vherbaut\LaravelPipelineJobs\PendingPipelineDispatch;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineServiceProvider;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
@@ -80,4 +81,15 @@ it('keeps tests/TestCase.php getPackageAliases() in sync with composer.json extr
 it('resolves the root-namespace Pipeline alias via the alias loader at runtime', function () {
     expect(class_exists('Pipeline'))->toBeTrue()
         ->and(\Pipeline::getFacadeRoot())->toBeInstanceOf(JobPipeline::class);
+});
+
+it('Pipeline::dispatch() facade resolves to PendingPipelineDispatch', function (): void {
+    Pipeline::fake();
+
+    $wrapper = Pipeline::dispatch([]);
+
+    expect($wrapper)->toBeInstanceOf(PendingPipelineDispatch::class);
+
+    // Cancel on empty-builder wrapper (would throw InvalidPipelineDefinition via run()).
+    $wrapper->cancel();
 });

@@ -7,7 +7,10 @@ namespace Vherbaut\LaravelPipelineJobs\Testing;
 use Closure;
 use PHPUnit\Framework\Assert;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\PendingPipelineDispatch;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
 /**
  * Test double for JobPipeline that intercepts and records pipeline executions.
@@ -66,6 +69,29 @@ class PipelineFake
     public function make(array $jobs = []): FakePipelineBuilder
     {
         return new FakePipelineBuilder($this, $jobs);
+    }
+
+    /**
+     * Create a pending dispatch that records the pipeline when destroyed.
+     *
+     * Mirrors Pipeline::dispatch() under Pipeline::fake(): the returned
+     * PendingPipelineDispatch wraps a FakePipelineBuilder instead of a real
+     * PipelineBuilder, so the eventual __destruct() -> run() call records the
+     * pipeline definition on this fake without executing any jobs (parallels
+     * the existing Pipeline::fake()->make()->run() recording path).
+     *
+     * Recording mode (Pipeline::fake()->recording()) behaves identically: the
+     * FakePipelineBuilder::run() call from the destructor executes through the
+     * RecordingExecutor and captures per-step context snapshots.
+     *
+     * @param array<int, class-string|StepDefinition> $jobs Fully qualified job class names or pre-built step definitions.
+     * @return PendingPipelineDispatch A wrapper that records the pipeline on destruction.
+     *
+     * @throws InvalidPipelineDefinition When a job entry is neither a class-string nor a StepDefinition. Surfaces at construction time.
+     */
+    public function dispatch(array $jobs = []): PendingPipelineDispatch
+    {
+        return new PendingPipelineDispatch($this->make($jobs));
     }
 
     /**
