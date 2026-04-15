@@ -6,6 +6,7 @@ use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
@@ -401,4 +402,52 @@ it('default retry / backoff / timeout: declaration order independent', function 
     expect($configs[0]['retry'])->toBe(2)
         ->and($configs[0]['backoff'])->toBe(1)
         ->and($configs[0]['timeout'])->toBeNull();
+});
+
+it('dispatch: auto-executes on destruct in bare-statement form', function (): void {
+    Pipeline::dispatch([TrackExecutionJobA::class])->send(new SimpleContext);
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([TrackExecutionJobA::class]);
+});
+
+it('dispatch: produces identical step invocations to make()->run() with same config', function (): void {
+    $ctx = new SimpleContext;
+    Pipeline::make([TrackExecutionJobA::class, TrackExecutionJobB::class])->send($ctx)->run();
+    $fromMake = TrackExecutionJob::$executionOrder;
+
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::dispatch([TrackExecutionJobA::class, TrackExecutionJobB::class])->send($ctx);
+    $fromDispatch = TrackExecutionJob::$executionOrder;
+
+    expect($fromDispatch)->toBe($fromMake)
+        ->and($fromDispatch)->toBe([TrackExecutionJobA::class, TrackExecutionJobB::class]);
+});
+
+it('dispatch: propagates StepExecutionFailed from destruct identically to make()->run()', function (): void {
+    expect(fn () => Pipeline::dispatch([FailingJob::class])->send(new SimpleContext))
+        ->toThrow(StepExecutionFailed::class);
+});
+
+it('dispatch: pipelineContext() inside step jobs returns the same context sent via ->send()', function (): void {
+    $ctx = new SimpleContext;
+    $ctx->name = 'expected';
+
+    Pipeline::dispatch([ReadContextJob::class])->send($ctx);
+
+    expect(ReadContextJob::$readName)->toBe('expected');
+});
+
+it('dispatch: variable-scope form defers execution until variable destruction', function (): void {
+    $flag = null;
+
+    (function () use (&$flag): void {
+        $pending = Pipeline::dispatch([TrackExecutionJobA::class])->send(new SimpleContext);
+        $flag = TrackExecutionJob::$executionOrder;
+        unset($pending);
+    })();
+
+    // During the closure body, before unset(), the job had NOT run.
+    expect($flag)->toBe([])
+        ->and(TrackExecutionJob::$executionOrder)->toBe([TrackExecutionJobA::class]);
 });

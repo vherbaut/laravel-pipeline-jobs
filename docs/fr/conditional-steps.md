@@ -59,4 +59,4 @@ Si l'étape conditionnelle est sautée (la closure a retourné faux), sa compens
 
 ## Interaction avec les hooks de cycle de vie
 
-Les [hooks de cycle de vie par étape](lifecycle-hooks-fr.md) ne se déclenchent pas pour les étapes sautées via `when()` / `unless()`. La vérification d'exclusion précède tout déclenchement de hook.
+Les [hooks de cycle de vie par étape](lifecycle-hooks.md) ne se déclenchent pas pour les étapes sautées via `when()` / `unless()`. La vérification d'exclusion précède tout déclenchement de hook.

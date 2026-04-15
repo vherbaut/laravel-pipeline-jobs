@@ -14,6 +14,7 @@ use Vherbaut\LaravelPipelineJobs\Testing\PipelineFake;
  * @see JobPipeline
  *
  * @method static \Vherbaut\LaravelPipelineJobs\PipelineBuilder|\Vherbaut\LaravelPipelineJobs\Testing\FakePipelineBuilder make(array<int, class-string> $jobs = [])
+ * @method static \Vherbaut\LaravelPipelineJobs\PendingPipelineDispatch dispatch(array<int, class-string> $jobs = [])
  * @method static void listen(class-string $eventClass, array<int, class-string> $jobs, \Closure|null $send = null)
  * @method static \Vherbaut\LaravelPipelineJobs\Testing\PipelineFake recording()
  * @method static void assertPipelineRan(\Closure|null $callback = null)

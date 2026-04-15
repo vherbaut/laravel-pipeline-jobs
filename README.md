@@ -121,29 +121,32 @@ $result = JobPipeline::make([
 // $result is the final OrderContext with all steps applied.
 ```
 
-For the full walkthrough (context design, queued mode, compensation, hooks, testing), see [docs/getting-started.md](docs/getting-started.md).
+For the full walkthrough (context design, queued mode, compensation, hooks, testing), see [docs/en/getting-started.md](docs/en/getting-started.md).
 
 ## Documentation
 
+English documentation lives under [`docs/en/`](docs/en/). French documentation lives under [`docs/fr/`](docs/fr/).
+
 | Topic | Description | Link |
 |-------|-------------|------|
-| Getting Started | Install the package, write your first typed context, run a pipeline, pass data between steps. | [docs/getting-started.md](docs/getting-started.md) |
-| Core Concepts | `PipelineContext`, `PipelineBuilder` (array vs fluent), sync and queued execution modes. | [docs/core-concepts.md](docs/core-concepts.md) |
-| Pipeline Aware Jobs | Wire a job to the shared context via the `InteractsWithPipeline` trait or an explicit property. Dual mode jobs. | [docs/pipeline-aware-jobs.md](docs/pipeline-aware-jobs.md) |
-| Return Values | Transform the final context into a scalar value with `->return(Closure)`. | [docs/return-values.md](docs/return-values.md) |
-| Conditional Steps | Branch execution with `when()` / `unless()` predicates evaluated against the live context. | [docs/conditional-steps.md](docs/conditional-steps.md) |
-| Queued Pipelines | Run pipelines through Laravel's queue system. Serialization, retries, worker affinity. | [docs/queued-pipelines.md](docs/queued-pipelines.md) |
-| Event Listener Bridge | Register a pipeline as an event listener with `JobPipeline::listen()` or `toListener()`. | [docs/event-listener-bridge.md](docs/event-listener-bridge.md) |
-| Saga Compensation | Rollback with `compensateWith()`, `FailStrategy` policies, `CompensableJob` contract, failure observability. | [docs/saga-compensation.md](docs/saga-compensation.md) |
-| Lifecycle Hooks | Per-step hooks (`beforeEach`, `afterEach`, `onStepFailed`) and pipeline-level callbacks (`onSuccess`, `onFailure(Closure)`, `onComplete`). | [docs/lifecycle-hooks.md](docs/lifecycle-hooks.md) |
-| Testing | `Pipeline::fake()`, recording mode, step and context assertions, compensation assertions. | [docs/testing.md](docs/testing.md) |
-| API Reference | Complete catalog of public symbols, methods, properties, exceptions, and events. | [docs/api-reference.md](docs/api-reference.md) |
+| Getting Started | Install the package, write your first typed context, run a pipeline, pass data between steps. | [docs/en/getting-started.md](docs/en/getting-started.md) |
+| Core Concepts | `PipelineContext`, `PipelineBuilder` (array vs fluent), sync and queued execution modes. | [docs/en/core-concepts.md](docs/en/core-concepts.md) |
+| Pipeline Aware Jobs | Wire a job to the shared context via the `InteractsWithPipeline` trait or an explicit property. Dual mode jobs. | [docs/en/pipeline-aware-jobs.md](docs/en/pipeline-aware-jobs.md) |
+| Return Values | Transform the final context into a scalar value with `->return(Closure)`. | [docs/en/return-values.md](docs/en/return-values.md) |
+| Conditional Steps | Branch execution with `when()` / `unless()` predicates evaluated against the live context. | [docs/en/conditional-steps.md](docs/en/conditional-steps.md) |
+| Queued Pipelines | Run pipelines through Laravel's queue system. Serialization, retries, worker affinity. | [docs/en/queued-pipelines.md](docs/en/queued-pipelines.md) |
+| Event Listener Bridge | Register a pipeline as an event listener with `JobPipeline::listen()` or `toListener()`. | [docs/en/event-listener-bridge.md](docs/en/event-listener-bridge.md) |
+| Saga Compensation | Rollback with `compensateWith()`, `FailStrategy` policies, `CompensableJob` contract, failure observability. | [docs/en/saga-compensation.md](docs/en/saga-compensation.md) |
+| Lifecycle Hooks | Per-step hooks (`beforeEach`, `afterEach`, `onStepFailed`) and pipeline-level callbacks (`onSuccess`, `onFailure(Closure)`, `onComplete`). | [docs/en/lifecycle-hooks.md](docs/en/lifecycle-hooks.md) |
+| Per-Step Configuration | Route each step to its own queue or connection, override sync execution, set retry, backoff, and timeout policies per step, with pipeline-level defaults. | [docs/en/per-step-configuration.md](docs/en/per-step-configuration.md) |
+| Dispatch Verb | Execute a pipeline with `Pipeline::dispatch([...])` as a Bus::dispatch-style alternative to `->make()->run()`. Auto-runs on destruct. | [docs/en/dispatch-verb.md](docs/en/dispatch-verb.md) |
+| Testing | `Pipeline::fake()`, recording mode, step and context assertions, compensation assertions. | [docs/en/testing.md](docs/en/testing.md) |
+| API Reference | Complete catalog of public symbols, methods, properties, exceptions, and events. | [docs/en/api-reference.md](docs/en/api-reference.md) |
 
 ## Roadmap
 
 The following features are planned for future releases. The properties are already reserved in the codebase:
 
-- **Per step queue configuration.** Set queue name, connection, retry count, backoff, and timeout per step.
 - **Named pipelines.** `name('order-fulfillment')` for better observability and logging.
 - **Parallel steps.** Fan out pattern for steps that can execute concurrently.
 - **Pipeline events.** Dispatch Laravel events at key lifecycle points.

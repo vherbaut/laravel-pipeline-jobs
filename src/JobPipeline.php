@@ -27,6 +27,30 @@ final class JobPipeline
     }
 
     /**
+     * Create a pending dispatch that auto-executes when the returned wrapper is destroyed.
+     *
+     * Alternative execution verb matching Laravel's Bus::dispatch() familiarity.
+     * The returned PendingPipelineDispatch proxies every fluent method on
+     * PipelineBuilder; calling run() is unnecessary. The wrapper's __destruct()
+     * invokes it automatically when the object goes out of scope.
+     *
+     * For synchronous pipelines where the final PipelineContext or a ->return()
+     * callback result is needed, prefer Pipeline::make($jobs)->send($ctx)->run()
+     * which returns the value directly. The dispatch() verb eagerly executes on
+     * destruction and discards the return value; any exception raised during
+     * execution still propagates out of the destructor call site (AC #11).
+     *
+     * @param array<int, class-string|StepDefinition> $jobs Fully qualified job class names or pre-built step definitions.
+     * @return PendingPipelineDispatch A wrapper that auto-runs on destruction.
+     *
+     * @throws InvalidPipelineDefinition When a job entry is neither a class-string nor a StepDefinition. Surfaces at construction time.
+     */
+    public static function dispatch(array $jobs = []): PendingPipelineDispatch
+    {
+        return new PendingPipelineDispatch(new PipelineBuilder($jobs));
+    }
+
+    /**
      * Register a pipeline as a Laravel event listener in a single call.
      *
      * Equivalent to: make($jobs)->send($send)->toListener() + Event::listen($eventClass, $listener).

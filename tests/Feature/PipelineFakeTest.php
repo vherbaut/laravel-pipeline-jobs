@@ -468,3 +468,57 @@ it('per-step retry: Pipeline::fake()->recording() mode runs each step exactly on
 
     expect(FailingThenSucceedingJob::$invocationCount)->toBe(1);
 });
+
+it('Pipeline::fake()->dispatch() records the pipeline on destruct', function (): void {
+    Pipeline::fake();
+
+    Pipeline::dispatch([TrackExecutionJobA::class, TrackExecutionJobB::class])
+        ->send(new SimpleContext);
+
+    Pipeline::assertPipelineRan();
+    Pipeline::assertPipelineRanWith([TrackExecutionJobA::class, TrackExecutionJobB::class]);
+    expect(TrackExecutionJob::$executionOrder)->toBeEmpty();
+});
+
+it('Pipeline::fake()->recording() with dispatch() executes through RecordingExecutor', function (): void {
+    Pipeline::fake()->recording();
+
+    $ctx = new SimpleContext;
+    $ctx->name = 'recorded';
+
+    Pipeline::dispatch([EnrichContextJob::class, ReadContextJob::class])->send($ctx);
+
+    $capturedAfterEnrich = Pipeline::getContextAfterStep(EnrichContextJob::class);
+    expect($capturedAfterEnrich)->toBeInstanceOf(SimpleContext::class)
+        ->and($capturedAfterEnrich->name)->toBe('enriched');
+});
+
+it('Pipeline::fake()->dispatch() and Pipeline::fake()->make()->run() produce equivalent recorded definitions', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class, FakeJobB::class])->send(new SimpleContext)->run();
+    Pipeline::dispatch([FakeJobA::class, FakeJobB::class])->send(new SimpleContext);
+
+    $recorded = $fake->recordedPipelines();
+    expect($recorded)->toHaveCount(2);
+
+    $makeSteps = array_map(fn ($s) => $s->jobClass, $recorded[0]->definition->steps);
+    $dispatchSteps = array_map(fn ($s) => $s->jobClass, $recorded[1]->definition->steps);
+    expect($makeSteps)->toBe($dispatchSteps)
+        ->and($makeSteps)->toBe([FakeJobA::class, FakeJobB::class]);
+});
+
+it('Pipeline::fake() assertion helpers work against dispatch()-originated pipelines', function (): void {
+    Pipeline::fake()->recording();
+    Pipeline::assertNoPipelinesRan();
+
+    $ctx = new SimpleContext;
+    $ctx->name = 'probe';
+
+    Pipeline::dispatch([TrackExecutionJobA::class])->send($ctx);
+
+    Pipeline::assertPipelineRan();
+    Pipeline::assertPipelineRanTimes(1);
+    Pipeline::assertStepExecuted(TrackExecutionJobA::class);
+    Pipeline::assertContextHas('name', 'probe');
+});

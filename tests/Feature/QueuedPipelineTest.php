@@ -7,10 +7,13 @@ use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+use Vherbaut\LaravelPipelineJobs\Exceptions\ContextSerializationFailed;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\PipelineStepJob;
+use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\NonSerializableContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
@@ -752,4 +755,87 @@ it('default timeout: step inherits pipeline-level defaultTimeout', function (): 
         PipelineStepJob::class,
         fn (PipelineStepJob $job): bool => $job->timeout === 60,
     );
+});
+
+it('dispatch (queued): shouldBeQueued() triggers first-step wrapper push under Bus::fake()', function (): void {
+    Bus::fake();
+
+    Pipeline::dispatch([TrackExecutionJobA::class, TrackExecutionJobB::class])
+        ->send(new SimpleContext)
+        ->shouldBeQueued();
+
+    Bus::assertDispatchedTimes(PipelineStepJob::class, 1);
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->manifest->currentStepIndex === 0
+            && $job->manifest->stepClasses[0] === TrackExecutionJobA::class,
+    );
+});
+
+it('dispatch (queued): produces a PipelineStepJob with manifest byte-identical to make()->run()', function (): void {
+    Bus::fake();
+
+    $ctx = new SimpleContext;
+    $ctx->name = 'parity';
+
+    Pipeline::make([TrackExecutionJobA::class, TrackExecutionJobB::class])
+        ->send($ctx)
+        ->onQueue('parity-queue')
+        ->retry(2)
+        ->timeout(30)
+        ->shouldBeQueued()
+        ->run();
+
+    /** @var PipelineStepJob $jobFromMake */
+    $jobFromMake = Bus::dispatched(PipelineStepJob::class)->first();
+
+    Bus::fake();
+
+    Pipeline::dispatch([TrackExecutionJobA::class, TrackExecutionJobB::class])
+        ->send($ctx)
+        ->onQueue('parity-queue')
+        ->retry(2)
+        ->timeout(30)
+        ->shouldBeQueued();
+
+    /** @var PipelineStepJob $jobFromDispatch */
+    $jobFromDispatch = Bus::dispatched(PipelineStepJob::class)->first();
+
+    // Exclude pipelineId (per-execution UUID) but prove every other field is structurally identical (AC #15).
+    $strip = static fn (PipelineManifest $m): array => array_diff_key(
+        (array) $m,
+        ['pipelineId' => null],
+    );
+
+    expect(serialize($strip($jobFromMake->manifest)))
+        ->toBe(serialize($strip($jobFromDispatch->manifest)));
+});
+
+it('dispatch (queued): onQueue / timeout on step-level config thread through to the wrapper', function (): void {
+    Bus::fake();
+
+    Pipeline::dispatch([TrackExecutionJobA::class])
+        ->onQueue('heavy')
+        ->timeout(60)
+        ->send(new SimpleContext)
+        ->shouldBeQueued();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->queue === 'heavy' && $job->timeout === 60,
+    );
+});
+
+it('dispatch (queued): ContextSerializationFailed propagates from destruct', function (): void {
+    Bus::fake();
+
+    $context = new NonSerializableContext;
+    $context->callback = fn () => null;
+
+    expect(fn () => Pipeline::dispatch([TrackExecutionJobA::class])
+        ->send($context)
+        ->shouldBeQueued())
+        ->toThrow(ContextSerializationFailed::class);
+
+    Bus::assertNothingDispatched();
 });

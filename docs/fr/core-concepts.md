@@ -54,7 +54,7 @@ JobPipeline::make()
 
 Les deux produisent la même `PipelineDefinition` immuable. Choisissez celle qui se lit le mieux pour votre cas d'usage.
 
-L'API fluide est requise quand vous devez attacher des métadonnées à une étape individuelle, par exemple `compensateWith()` pour la [compensation saga](saga-compensation-fr.md) ou les branches conditionnelles via [`when()` / `unless()`](conditional-steps-fr.md).
+L'API fluide est requise quand vous devez attacher des métadonnées à une étape individuelle, par exemple `compensateWith()` pour la [compensation saga](saga-compensation.md) ou les branches conditionnelles via [`when()` / `unless()`](conditional-steps.md).
 
 ## Modes d'exécution
 
@@ -83,4 +83,4 @@ JobPipeline::make([...])
 
 L'exécuteur queued valide la sérialisation du contexte **avant** le dispatch. Si votre contexte contient une closure ou une ressource, vous obtiendrez immédiatement une exception `ContextSerializationFailed` plutôt qu'une erreur mystérieuse dans la queue quelques minutes plus tard.
 
-Voir [Pipelines en file d'attente](queued-pipelines-fr.md) pour un approfondissement sur la sémantique queue, les retries et l'affinité worker.
+Voir [Pipelines en file d'attente](queued-pipelines.md) pour un approfondissement sur la sémantique queue, les retries et l'affinité worker.

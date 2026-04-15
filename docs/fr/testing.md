@@ -171,4 +171,4 @@ it('compense les étapes complétées en cas d\'échec', function () {
 
 ## Tester les hooks de cycle de vie
 
-Les hooks de cycle de vie se déclenchent de manière identique sous `Pipeline::fake()->recording()`. Aucune assertion dédiée aux hooks n'est livrée aujourd'hui. Utilisez des flags booléens locaux ou des closures espion. Voir [Hooks de cycle de vie](lifecycle-hooks-fr.md#tester-les-hooks) pour des exemples.
+Les hooks de cycle de vie se déclenchent de manière identique sous `Pipeline::fake()->recording()`. Aucune assertion dédiée aux hooks n'est livrée aujourd'hui. Utilisez des flags booléens locaux ou des closures espion. Voir [Hooks de cycle de vie](lifecycle-hooks.md#tester-les-hooks) pour des exemples.

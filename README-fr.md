@@ -121,29 +121,32 @@ $result = JobPipeline::make([
 // $result est le OrderContext final avec toutes les étapes appliquées.
 ```
 
-Pour le tour complet (conception du contexte, mode queue, compensation, hooks, tests), voir [docs/getting-started-fr.md](docs/getting-started-fr.md).
+Pour le tour complet (conception du contexte, mode queue, compensation, hooks, tests), voir [docs/fr/getting-started.md](docs/fr/getting-started.md).
 
 ## Documentation
 
+La documentation anglaise se trouve sous [`docs/en/`](docs/en/). La documentation française se trouve sous [`docs/fr/`](docs/fr/).
+
 | Sujet | Description | Lien |
 |-------|-------------|------|
-| Démarrage | Installer le package, écrire un premier contexte typé, exécuter un pipeline, transmettre des données. | [docs/getting-started-fr.md](docs/getting-started-fr.md) |
-| Concepts clés | `PipelineContext`, `PipelineBuilder` (tableau vs fluide), modes d'exécution synchrone et queued. | [docs/core-concepts-fr.md](docs/core-concepts-fr.md) |
-| Jobs compatibles Pipeline | Relier un job au contexte partagé via le trait `InteractsWithPipeline` ou une propriété explicite. Jobs double mode. | [docs/pipeline-aware-jobs-fr.md](docs/pipeline-aware-jobs-fr.md) |
-| Valeurs de retour | Transformer le contexte final en une valeur scalaire avec `->return(Closure)`. | [docs/return-values-fr.md](docs/return-values-fr.md) |
-| Étapes conditionnelles | Brancher l'exécution avec les prédicats `when()` / `unless()` évalués contre le contexte en direct. | [docs/conditional-steps-fr.md](docs/conditional-steps-fr.md) |
-| Pipelines en file d'attente | Exécuter les pipelines via le système de queue de Laravel. Sérialisation, retries, affinité worker. | [docs/queued-pipelines-fr.md](docs/queued-pipelines-fr.md) |
-| Pont Event Listener | Enregistrer un pipeline comme event listener avec `JobPipeline::listen()` ou `toListener()`. | [docs/event-listener-bridge-fr.md](docs/event-listener-bridge-fr.md) |
-| Compensation Saga | Rollback avec `compensateWith()`, politiques `FailStrategy`, contrat `CompensableJob`, observabilité des échecs. | [docs/saga-compensation-fr.md](docs/saga-compensation-fr.md) |
-| Hooks de cycle de vie | Hooks par étape (`beforeEach`, `afterEach`, `onStepFailed`) et callbacks au niveau pipeline (`onSuccess`, `onFailure(Closure)`, `onComplete`). | [docs/lifecycle-hooks-fr.md](docs/lifecycle-hooks-fr.md) |
-| Tests | `Pipeline::fake()`, mode recording, assertions d'étapes et de contexte, assertions de compensation. | [docs/testing-fr.md](docs/testing-fr.md) |
-| Référence API | Catalogue complet des symboles publics, méthodes, propriétés, exceptions et events. | [docs/api-reference-fr.md](docs/api-reference-fr.md) |
+| Démarrage | Installer le package, écrire un premier contexte typé, exécuter un pipeline, transmettre des données. | [docs/fr/getting-started.md](docs/fr/getting-started.md) |
+| Concepts clés | `PipelineContext`, `PipelineBuilder` (tableau vs fluide), modes d'exécution synchrone et queued. | [docs/fr/core-concepts.md](docs/fr/core-concepts.md) |
+| Jobs compatibles Pipeline | Relier un job au contexte partagé via le trait `InteractsWithPipeline` ou une propriété explicite. Jobs double mode. | [docs/fr/pipeline-aware-jobs.md](docs/fr/pipeline-aware-jobs.md) |
+| Valeurs de retour | Transformer le contexte final en une valeur scalaire avec `->return(Closure)`. | [docs/fr/return-values.md](docs/fr/return-values.md) |
+| Étapes conditionnelles | Brancher l'exécution avec les prédicats `when()` / `unless()` évalués contre le contexte en direct. | [docs/fr/conditional-steps.md](docs/fr/conditional-steps.md) |
+| Pipelines en file d'attente | Exécuter les pipelines via le système de queue de Laravel. Sérialisation, retries, affinité worker. | [docs/fr/queued-pipelines.md](docs/fr/queued-pipelines.md) |
+| Pont Event Listener | Enregistrer un pipeline comme event listener avec `JobPipeline::listen()` ou `toListener()`. | [docs/fr/event-listener-bridge.md](docs/fr/event-listener-bridge.md) |
+| Compensation Saga | Rollback avec `compensateWith()`, politiques `FailStrategy`, contrat `CompensableJob`, observabilité des échecs. | [docs/fr/saga-compensation.md](docs/fr/saga-compensation.md) |
+| Hooks de cycle de vie | Hooks par étape (`beforeEach`, `afterEach`, `onStepFailed`) et callbacks au niveau pipeline (`onSuccess`, `onFailure(Closure)`, `onComplete`). | [docs/fr/lifecycle-hooks.md](docs/fr/lifecycle-hooks.md) |
+| Configuration par étape | Router chaque étape sur sa propre queue ou connexion, forcer l'exécution synchrone, définir retry, backoff et timeout par étape, avec des valeurs par défaut au niveau pipeline. | [docs/fr/per-step-configuration.md](docs/fr/per-step-configuration.md) |
+| Verbe Dispatch | Exécuter un pipeline avec `Pipeline::dispatch([...])` comme alternative à `->make()->run()`, dans le style `Bus::dispatch()`. Auto-exécution au destruct. | [docs/fr/dispatch-verb.md](docs/fr/dispatch-verb.md) |
+| Tests | `Pipeline::fake()`, mode recording, assertions d'étapes et de contexte, assertions de compensation. | [docs/fr/testing.md](docs/fr/testing.md) |
+| Référence API | Catalogue complet des symboles publics, méthodes, propriétés, exceptions et events. | [docs/fr/api-reference.md](docs/fr/api-reference.md) |
 
 ## Feuille de route
 
 Les fonctionnalités suivantes sont prévues pour les prochaines versions. Les propriétés correspondantes sont déjà réservées dans le code :
 
-- **Configuration de queue par étape.** Définir le nom de la queue, la connexion, le nombre de retries, le backoff et le timeout par étape.
 - **Pipelines nommés.** `name('order-fulfillment')` pour une meilleure observabilité et traçabilité.
 - **Étapes parallèles.** Pattern fan out pour les étapes qui peuvent s'exécuter simultanément.
 - **Événements de pipeline.** Émettre des événements Laravel aux points clés du cycle de vie.
