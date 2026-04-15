@@ -257,9 +257,9 @@ it('preserves PipelineContext through serialization round-trip', function () {
 
 it('preserves stepConfigs through serialization round-trip', function () {
     $stepConfigs = [
-        0 => ['queue' => 'heavy', 'connection' => 'redis', 'sync' => false],
-        1 => ['queue' => null, 'connection' => null, 'sync' => true],
-        2 => ['queue' => 'background', 'connection' => null, 'sync' => false],
+        0 => ['queue' => 'heavy', 'connection' => 'redis', 'sync' => false, 'retry' => 3, 'backoff' => 5, 'timeout' => 60],
+        1 => ['queue' => null, 'connection' => null, 'sync' => true, 'retry' => null, 'backoff' => null, 'timeout' => null],
+        2 => ['queue' => 'background', 'connection' => null, 'sync' => false, 'retry' => 1, 'backoff' => null, 'timeout' => 30],
     ];
 
     $manifest = PipelineManifest::create(
@@ -271,6 +271,43 @@ it('preserves stepConfigs through serialization round-trip', function () {
     $restored = unserialize(serialize($manifest));
 
     expect($restored->stepConfigs)->toBe($stepConfigs);
+});
+
+it('preserves pre-Story-7.2 three-key stepConfigs shape through deserialization for backward compatibility', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+
+    // Legacy payload shape from Story 7.1 (three-key stepConfigs without retry/backoff/timeout).
+    $legacyPayload = [
+        'pipelineId' => $manifest->pipelineId,
+        'pipelineName' => null,
+        'stepClasses' => ['App\\Jobs\\Step'],
+        'compensationMapping' => [],
+        'stepConditions' => [],
+        'currentStepIndex' => 0,
+        'completedSteps' => [],
+        'context' => null,
+        'failStrategy' => $manifest->failStrategy,
+        'failedStepClass' => null,
+        'failedStepIndex' => null,
+        'beforeEachHooks' => [],
+        'afterEachHooks' => [],
+        'onStepFailedHooks' => [],
+        'onSuccessCallback' => null,
+        'onFailureCallback' => null,
+        'onCompleteCallback' => null,
+        'stepConfigs' => [
+            0 => ['queue' => 'heavy', 'connection' => 'redis', 'sync' => false],
+        ],
+    ];
+
+    $restored = (new ReflectionClass(PipelineManifest::class))->newInstanceWithoutConstructor();
+    $restored->__unserialize($legacyPayload);
+
+    // Legacy three-key entries survive as-is; downstream consumers use `?? null` to degrade to no-retry / no-timeout.
+    expect($restored->stepConfigs[0])->toBe(['queue' => 'heavy', 'connection' => 'redis', 'sync' => false])
+        ->and($restored->stepConfigs[0]['retry'] ?? null)->toBeNull()
+        ->and($restored->stepConfigs[0]['backoff'] ?? null)->toBeNull()
+        ->and($restored->stepConfigs[0]['timeout'] ?? null)->toBeNull();
 });
 
 it('defaults stepConfigs to an empty array when deserializing a legacy payload', function () {

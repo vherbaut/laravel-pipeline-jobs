@@ -393,3 +393,78 @@ it('per-step queue: FakePipelineBuilder delegates onQueue, onConnection, sync, d
         ->and($definition->defaultQueue)->toBe('background')
         ->and($definition->defaultConnection)->toBe('redis');
 });
+
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingThenSucceedingJob;
+
+it('per-step retry: Pipeline::fake() captures retry/backoff/timeout on the recorded definition', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make()
+        ->step(FakeJobA::class)->retry(3)->backoff(5)->timeout(60)
+        ->shouldBeQueued()
+        ->run();
+
+    $recorded = $fake->recordedPipelines();
+    $definition = $recorded[0]->definition;
+
+    expect($definition->steps[0]->retry)->toBe(3)
+        ->and($definition->steps[0]->backoff)->toBe(5)
+        ->and($definition->steps[0]->timeout)->toBe(60);
+});
+
+it('per-step retry: Pipeline::fake() does NOT invoke handle() even when retry is configured', function (): void {
+    FailingThenSucceedingJob::reset();
+    Pipeline::fake();
+
+    Pipeline::make()
+        ->step(FailingThenSucceedingJob::class)->retry(5)
+        ->run();
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(0);
+});
+
+it('per-step retry: FakePipelineBuilder delegates retry, backoff, timeout, defaultRetry, defaultBackoff, defaultTimeout to the underlying PipelineBuilder', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make()
+        ->defaultRetry(1)
+        ->defaultBackoff(2)
+        ->defaultTimeout(30)
+        ->step(FakeJobA::class)
+        ->retry(3)
+        ->backoff(5)
+        ->timeout(60)
+        ->step(FakeJobB::class)
+        ->shouldBeQueued()
+        ->run();
+
+    $recorded = $fake->recordedPipelines();
+    $definition = $recorded[0]->definition;
+
+    expect($definition->steps[0]->retry)->toBe(3)
+        ->and($definition->steps[0]->backoff)->toBe(5)
+        ->and($definition->steps[0]->timeout)->toBe(60)
+        ->and($definition->steps[1]->retry)->toBeNull()
+        ->and($definition->steps[1]->backoff)->toBeNull()
+        ->and($definition->steps[1]->timeout)->toBeNull()
+        ->and($definition->defaultRetry)->toBe(1)
+        ->and($definition->defaultBackoff)->toBe(2)
+        ->and($definition->defaultTimeout)->toBe(30);
+});
+
+it('per-step retry: Pipeline::fake()->recording() mode runs each step exactly once even when retry is configured', function (): void {
+    FailingThenSucceedingJob::reset();
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 99; // always fails
+
+    Pipeline::fake()->recording();
+
+    try {
+        Pipeline::make()
+            ->step(FailingThenSucceedingJob::class)->retry(3)
+            ->run();
+    } catch (Throwable) {
+        // expected; retry is inert so only the first attempt throws
+    }
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(1);
+});

@@ -176,3 +176,36 @@ it('dispatches the compensation chain on the Laravel default queue regardless of
         },
     ]);
 });
+
+it('CompensationStepJob dispatched from a pipeline with retry/timeout on the failing step does NOT carry retry or timeout onto the compensation wrapper', function (): void {
+    Bus::fake();
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class, FailingJob::class],
+        context: new SimpleContext,
+        compensationMapping: [TrackExecutionJobA::class => CompensateJobA::class],
+        failStrategy: FailStrategy::StopAndCompensate,
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+            1 => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => 3, 'backoff' => 5, 'timeout' => 60],
+        ],
+    );
+
+    $manifest->markStepCompleted(TrackExecutionJobA::class);
+    $manifest->advanceStep();
+
+    try {
+        (new PipelineStepJob($manifest))->handle();
+    } catch (Throwable) {
+        // expected under StopAndCompensate
+    }
+
+    // The CompensationStepJob wrapper should not inherit retry or timeout from the failing step.
+    Bus::assertChained([
+        function (CompensationStepJob $job): bool {
+            return $job->compensationClass === CompensateJobA::class
+                && $job->tries === 1
+                && ($job->timeout ?? null) === null;
+        },
+    ]);
+});

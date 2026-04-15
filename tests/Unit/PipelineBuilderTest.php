@@ -725,8 +725,8 @@ it('resolveStepConfigs resolves step override over pipeline default', function (
 
     $configs = PipelineBuilder::resolveStepConfigs($definition);
 
-    expect($configs[0])->toBe(['queue' => 'heavy', 'connection' => null, 'sync' => false])
-        ->and($configs[1])->toBe(['queue' => 'background', 'connection' => null, 'sync' => false]);
+    expect($configs[0])->toBe(['queue' => 'heavy', 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null])
+        ->and($configs[1])->toBe(['queue' => 'background', 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null]);
 });
 
 it('resolveStepConfigs falls through to null when neither step nor pipeline default is set', function () {
@@ -734,7 +734,7 @@ it('resolveStepConfigs falls through to null when neither step nor pipeline defa
 
     $configs = PipelineBuilder::resolveStepConfigs($definition);
 
-    expect($configs[0])->toBe(['queue' => null, 'connection' => null, 'sync' => false]);
+    expect($configs[0])->toBe(['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null]);
 });
 
 it('resolveStepConfigs resolves defaultConnection for steps without explicit override', function () {
@@ -784,5 +784,168 @@ it('threads Step::make()->onQueue() through the array API into the resolved step
     $definition = $builder->build();
 
     expect($definition->steps[0]->queue)->toBe('heavy')
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('retry registers on the last step and propagates to the resolved manifest', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)->retry(3)
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($definition->steps[0]->retry)->toBe(3)
+        ->and($configs[0]['retry'])->toBe(3);
+});
+
+it('backoff registers on the last step and propagates to the resolved manifest', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)->retry(3)->backoff(5)
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($definition->steps[0]->backoff)->toBe(5)
+        ->and($configs[0]['backoff'])->toBe(5);
+});
+
+it('timeout registers on the last step and propagates to the resolved manifest', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)->timeout(60)
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($definition->steps[0]->timeout)->toBe(60)
+        ->and($configs[0]['timeout'])->toBe(60);
+});
+
+it('defaultRetry registers on the definition', function () {
+    $definition = (new PipelineBuilder)
+        ->defaultRetry(2)
+        ->step(FakeJobA::class)
+        ->build();
+
+    expect($definition->defaultRetry)->toBe(2);
+});
+
+it('defaultBackoff registers on the definition', function () {
+    $definition = (new PipelineBuilder)
+        ->defaultBackoff(3)
+        ->step(FakeJobA::class)
+        ->build();
+
+    expect($definition->defaultBackoff)->toBe(3);
+});
+
+it('defaultTimeout registers on the definition', function () {
+    $definition = (new PipelineBuilder)
+        ->defaultTimeout(45)
+        ->step(FakeJobA::class)
+        ->build();
+
+    expect($definition->defaultTimeout)->toBe(45);
+});
+
+it('retry throws InvalidPipelineDefinition when called before any step', function () {
+    (new PipelineBuilder)->retry(3);
+})->throws(InvalidPipelineDefinition::class, 'before adding a step');
+
+it('backoff throws InvalidPipelineDefinition when called before any step', function () {
+    (new PipelineBuilder)->backoff(5);
+})->throws(InvalidPipelineDefinition::class, 'before adding a step');
+
+it('timeout throws InvalidPipelineDefinition when called before any step', function () {
+    (new PipelineBuilder)->timeout(60);
+})->throws(InvalidPipelineDefinition::class, 'before adding a step');
+
+it('retry rejects negative values', function () {
+    (new PipelineBuilder)->step(FakeJobA::class)->retry(-1);
+})->throws(InvalidPipelineDefinition::class, 'retry must be a non-negative integer, got -1');
+
+it('backoff rejects negative values', function () {
+    (new PipelineBuilder)->step(FakeJobA::class)->backoff(-1);
+})->throws(InvalidPipelineDefinition::class, 'backoff must be a non-negative integer, got -1');
+
+it('timeout rejects zero', function () {
+    (new PipelineBuilder)->step(FakeJobA::class)->timeout(0);
+})->throws(InvalidPipelineDefinition::class, 'timeout must be a positive integer (>= 1), got 0');
+
+it('timeout rejects negative values', function () {
+    (new PipelineBuilder)->step(FakeJobA::class)->timeout(-5);
+})->throws(InvalidPipelineDefinition::class, 'timeout must be a positive integer (>= 1), got -5');
+
+it('defaultRetry rejects negative values', function () {
+    (new PipelineBuilder)->defaultRetry(-1);
+})->throws(InvalidPipelineDefinition::class, 'retry must be a non-negative integer, got -1');
+
+it('defaultBackoff rejects negative values', function () {
+    (new PipelineBuilder)->defaultBackoff(-1);
+})->throws(InvalidPipelineDefinition::class, 'backoff must be a non-negative integer, got -1');
+
+it('defaultTimeout rejects zero', function () {
+    (new PipelineBuilder)->defaultTimeout(0);
+})->throws(InvalidPipelineDefinition::class, 'timeout must be a positive integer (>= 1), got 0');
+
+it('defaultRetry/Backoff/Timeout can be called before any step', function () {
+    $definition = (new PipelineBuilder)
+        ->defaultRetry(2)
+        ->defaultBackoff(3)
+        ->defaultTimeout(60)
+        ->step(FakeJobA::class)
+        ->build();
+
+    expect($definition->defaultRetry)->toBe(2)
+        ->and($definition->defaultBackoff)->toBe(3)
+        ->and($definition->defaultTimeout)->toBe(60);
+});
+
+it('retry/backoff/timeout apply last-write-wins on the same step', function () {
+    $definition = (new PipelineBuilder)
+        ->step(FakeJobA::class)->retry(1)->retry(5)
+        ->backoff(1)->backoff(10)
+        ->timeout(30)->timeout(120)
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0]['retry'])->toBe(5)
+        ->and($configs[0]['backoff'])->toBe(10)
+        ->and($configs[0]['timeout'])->toBe(120);
+});
+
+it('step override takes precedence over pipeline defaults for retry/backoff/timeout', function () {
+    $definition = (new PipelineBuilder)
+        ->defaultRetry(1)
+        ->defaultBackoff(2)
+        ->defaultTimeout(30)
+        ->step(FakeJobA::class)->retry(5)->backoff(7)->timeout(60)
+        ->step(FakeJobB::class)
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0])->toBe(['queue' => null, 'connection' => null, 'sync' => false, 'retry' => 5, 'backoff' => 7, 'timeout' => 60])
+        ->and($configs[1])->toBe(['queue' => null, 'connection' => null, 'sync' => false, 'retry' => 1, 'backoff' => 2, 'timeout' => 30]);
+});
+
+it('resolveStepConfigs produces the extended six-key shape', function () {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect(array_keys($configs[0]))->toBe(['queue', 'connection', 'sync', 'retry', 'backoff', 'timeout']);
+});
+
+it('threads Step::make()->retry()->timeout() through the array API into the resolved step', function () {
+    $builder = new PipelineBuilder([
+        Step::make(FakeJobA::class)->retry(3)->backoff(5)->timeout(60),
+    ]);
+
+    $definition = $builder->build();
+
+    expect($definition->steps[0]->retry)->toBe(3)
+        ->and($definition->steps[0]->backoff)->toBe(5)
+        ->and($definition->steps[0]->timeout)->toBe(60)
         ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class);
 });

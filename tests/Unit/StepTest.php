@@ -71,3 +71,35 @@ it('Step::unless composes with sync without dropping the negated flag', function
         ->and($step->condition)->toBe($condition)
         ->and($step->conditionNegated)->toBeTrue();
 });
+
+it('Step::make composes with retry/backoff/timeout fluent methods', function (): void {
+    $step = Step::make(FakeJobA::class)
+        ->retry(3)
+        ->backoff(5)
+        ->timeout(60);
+
+    expect($step->jobClass)->toBe(FakeJobA::class)
+        ->and($step->retry)->toBe(3)
+        ->and($step->backoff)->toBe(5)
+        ->and($step->timeout)->toBe(60);
+});
+
+it('Step::when composes with retry without dropping the condition', function (): void {
+    $condition = fn (SimpleContext $ctx): bool => $ctx->active;
+
+    $step = Step::when($condition, FakeJobA::class)->retry(3);
+
+    expect($step->retry)->toBe(3)
+        ->and($step->condition)->toBe($condition)
+        ->and($step->conditionNegated)->toBeFalse();
+});
+
+it('Step::unless composes with timeout without dropping the negated flag', function (): void {
+    $condition = fn (SimpleContext $ctx): bool => $ctx->active;
+
+    $step = Step::unless($condition, FakeJobA::class)->timeout(60);
+
+    expect($step->timeout)->toBe(60)
+        ->and($step->condition)->toBe($condition)
+        ->and($step->conditionNegated)->toBeTrue();
+});

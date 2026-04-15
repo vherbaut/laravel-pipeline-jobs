@@ -38,6 +38,15 @@ final class PipelineBuilder
     /** @var string|null Pipeline-level default queue connection; steps without explicit onConnection() inherit this. */
     private ?string $defaultConnection = null;
 
+    /** @var int|null Pipeline-level default retry count; steps without explicit retry() inherit this. */
+    private ?int $defaultRetry = null;
+
+    /** @var int|null Pipeline-level default backoff delay in seconds; steps without explicit backoff() inherit this. */
+    private ?int $defaultBackoff = null;
+
+    /** @var int|null Pipeline-level default timeout in seconds; steps without explicit timeout() inherit this. */
+    private ?int $defaultTimeout = null;
+
     /** @var array<int, Closure> */
     private array $beforeEachHooks = [];
 
@@ -279,6 +288,106 @@ final class PipelineBuilder
     }
 
     /**
+     * Apply the given retry count to the last added step.
+     *
+     * Replaces the last StepDefinition with a new instance carrying the
+     * retry override. The count is the number of RETRY attempts after the
+     * initial attempt (a value of 3 means 4 total attempts). Last-write-wins
+     * when called twice on the same step. For a pipeline-wide default, use
+     * defaultRetry() instead. Retry is delivered via an in-process loop
+     * inside both SyncExecutor and PipelineStepJob; the queued wrapper's
+     * Laravel `$tries` remains locked to 1.
+     *
+     * @param int $retry Number of retry attempts after the initial attempt. Must be non-negative (0 means no retry).
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added or when $retry is negative.
+     */
+    public function retry(int $retry): static
+    {
+        if ($retry < 0) {
+            throw new InvalidPipelineDefinition('retry must be a non-negative integer, got '.$retry.'.');
+        }
+
+        if ($this->steps === []) {
+            throw new InvalidPipelineDefinition(
+                'Cannot call retry() on PipelineBuilder before adding a step. Chain retry() after step(), or call defaultRetry() for a pipeline-wide default.',
+            );
+        }
+
+        $last = array_pop($this->steps);
+        $this->steps[] = $last->retry($retry);
+
+        return $this;
+    }
+
+    /**
+     * Apply the given backoff delay to the last added step.
+     *
+     * Replaces the last StepDefinition with a new instance carrying the
+     * backoff override. The value is the number of seconds to sleep between
+     * retry attempts and is only consulted when retry is non-null and
+     * greater than zero. Last-write-wins when called twice on the same
+     * step. For a pipeline-wide default, use defaultBackoff() instead.
+     *
+     * @param int $backoff Seconds to sleep between retry attempts. Must be non-negative (0 means no sleep).
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added or when $backoff is negative.
+     */
+    public function backoff(int $backoff): static
+    {
+        if ($backoff < 0) {
+            throw new InvalidPipelineDefinition('backoff must be a non-negative integer, got '.$backoff.'.');
+        }
+
+        if ($this->steps === []) {
+            throw new InvalidPipelineDefinition(
+                'Cannot call backoff() on PipelineBuilder before adding a step. Chain backoff() after step(), or call defaultBackoff() for a pipeline-wide default.',
+            );
+        }
+
+        $last = array_pop($this->steps);
+        $this->steps[] = $last->backoff($backoff);
+
+        return $this;
+    }
+
+    /**
+     * Apply the given wrapper timeout to the last added step.
+     *
+     * Replaces the last StepDefinition with a new instance carrying the
+     * timeout override. The value is applied to the queued wrapper's public
+     * `$timeout` property at dispatch time. Inert in synchronous and
+     * recording execution modes (SyncExecutor and RecordingExecutor ignore
+     * this value; the manifest still carries it for test observability).
+     * Last-write-wins when called twice on the same step. For a
+     * pipeline-wide default, use defaultTimeout() instead.
+     *
+     * @param int $timeout Maximum execution time in seconds for the queued wrapper. Must be greater than or equal to 1.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When called before any step has been added or when $timeout is less than 1.
+     */
+    public function timeout(int $timeout): static
+    {
+        if ($timeout < 1) {
+            throw new InvalidPipelineDefinition('timeout must be a positive integer (>= 1), got '.$timeout.'.');
+        }
+
+        if ($this->steps === []) {
+            throw new InvalidPipelineDefinition(
+                'Cannot call timeout() on PipelineBuilder before adding a step. Chain timeout() after step(), or call defaultTimeout() for a pipeline-wide default.',
+            );
+        }
+
+        $last = array_pop($this->steps);
+        $this->steps[] = $last->timeout($timeout);
+
+        return $this;
+    }
+
+    /**
      * Declare the pipeline-level default queue for steps without explicit onQueue().
      *
      * Unlike onQueue(), this method is valid to call before any step has
@@ -324,6 +433,81 @@ final class PipelineBuilder
         }
 
         $this->defaultConnection = $connection;
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default retry count for steps without explicit retry().
+     *
+     * Unlike retry(), this method is valid to call before any step has been
+     * added because pipeline-level defaults are pipeline-wide. Steps with
+     * explicit retry() override the default. Last-write-wins when called
+     * multiple times. Active in both synchronous and queued modes because
+     * the retry loop runs in-process.
+     *
+     * @param int $retry Default retry attempts applied to steps without an explicit retry() override. Must be non-negative.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $retry is negative.
+     */
+    public function defaultRetry(int $retry): static
+    {
+        if ($retry < 0) {
+            throw new InvalidPipelineDefinition('retry must be a non-negative integer, got '.$retry.'.');
+        }
+
+        $this->defaultRetry = $retry;
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default backoff delay for steps without explicit backoff().
+     *
+     * Unlike backoff(), this method is valid to call before any step has
+     * been added because pipeline-level defaults are pipeline-wide. Steps
+     * with explicit backoff() override the default. Last-write-wins when
+     * called multiple times. Only consulted when the resolved retry value
+     * is non-null and greater than zero.
+     *
+     * @param int $backoff Default backoff (seconds) applied to steps without an explicit backoff() override. Must be non-negative.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $backoff is negative.
+     */
+    public function defaultBackoff(int $backoff): static
+    {
+        if ($backoff < 0) {
+            throw new InvalidPipelineDefinition('backoff must be a non-negative integer, got '.$backoff.'.');
+        }
+
+        $this->defaultBackoff = $backoff;
+
+        return $this;
+    }
+
+    /**
+     * Declare the pipeline-level default timeout for steps without explicit timeout().
+     *
+     * Unlike timeout(), this method is valid to call before any step has
+     * been added. Steps with explicit timeout() override the default.
+     * Last-write-wins when called multiple times. Inert in synchronous and
+     * recording execution modes (SyncExecutor and RecordingExecutor ignore
+     * the value; the manifest still carries it for test observability).
+     *
+     * @param int $timeout Default timeout (seconds) applied to steps without an explicit timeout() override. Must be greater than or equal to 1.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $timeout is less than 1.
+     */
+    public function defaultTimeout(int $timeout): static
+    {
+        if ($timeout < 1) {
+            throw new InvalidPipelineDefinition('timeout must be a positive integer (>= 1), got '.$timeout.'.');
+        }
+
+        $this->defaultTimeout = $timeout;
 
         return $this;
     }
@@ -631,6 +815,9 @@ final class PipelineBuilder
             failStrategy: $this->failStrategy,
             defaultQueue: $this->defaultQueue,
             defaultConnection: $this->defaultConnection,
+            defaultRetry: $this->defaultRetry,
+            defaultBackoff: $this->defaultBackoff,
+            defaultTimeout: $this->defaultTimeout,
         );
     }
 
@@ -875,10 +1062,10 @@ final class PipelineBuilder
     /**
      * Build the per-step execution configuration for the manifest.
      *
-     * Iterates the definition's steps and resolves queue / connection / sync
-     * values following the precedence rule `step override > pipeline default
-     * > null`. Sync has no pipeline-level default; the step's own sync flag
-     * is carried verbatim.
+     * Iterates the definition's steps and resolves queue / connection / sync /
+     * retry / backoff / timeout values following the precedence rule
+     * `step override > pipeline default > null`. Sync has no pipeline-level
+     * default; the step's own sync flag is carried verbatim.
      *
      * Called once at manifest creation time in run() and toListener() so
      * executors consume fully-resolved values without re-running precedence
@@ -888,7 +1075,7 @@ final class PipelineBuilder
      *
      * @param PipelineDefinition $definition The built pipeline definition carrying steps and pipeline-level defaults.
      *
-     * @return array<int, array{queue: ?string, connection: ?string, sync: bool}> Resolved per-step config indexed by step position.
+     * @return array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> Resolved per-step config indexed by step position.
      */
     public static function resolveStepConfigs(PipelineDefinition $definition): array
     {
@@ -899,6 +1086,9 @@ final class PipelineBuilder
                 'queue' => $step->queue ?? $definition->defaultQueue,
                 'connection' => $step->connection ?? $definition->defaultConnection,
                 'sync' => $step->sync,
+                'retry' => $step->retry ?? $definition->defaultRetry,
+                'backoff' => $step->backoff ?? $definition->defaultBackoff,
+                'timeout' => $step->timeout ?? $definition->defaultTimeout,
             ];
         }
 

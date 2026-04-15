@@ -56,22 +56,25 @@ final class QueuedExecutor implements PipelineExecutor
     /**
      * Dispatch the first PipelineStepJob wrapper, applying per-step config.
      *
-     * Three-branch logic driven by `stepConfigs[0]`:
+     * Branching driven by `stepConfigs[0]`:
      * - `sync === true` → `dispatch_sync()`: runs the wrapper synchronously
      *   in the current PHP process. Exceptions propagate synchronously into
-     *   the caller's stack frame.
+     *   the caller's stack frame. When a `timeout` is declared, it is still
+     *   assigned on the wrapper (observationally inert because `dispatch_sync`
+     *   does not install a `pcntl_alarm`) so test assertions observe the
+     *   declared value on both branches symmetrically.
      * - `sync === false` with explicit queue / connection → `dispatch()` with
      *   the returned PendingDispatch mutated via fluent `onQueue()` / `onConnection()`.
      * - `sync === false` with null queue / connection → no-op mutations
-     *   (the default Laravel queue / connection is preserved; the conditional
-     *   avoids degrading test-assertion signal by never calling
-     *   `onQueue(null)` / `onConnection(null)`).
+     *   (the default Laravel queue / connection is preserved).
      *
-     * Laravel's `dispatch()` helper returns a `PendingDispatch` object whose
-     * `onQueue()` / `onConnection()` methods are fluent; the actual queue
-     * push occurs when the object is destroyed at end of scope. The fluent
-     * chain form below keeps dispatch and overrides in a single expression
-     * so the PendingDispatch is fully configured before it goes out of scope.
+     * When `timeout` is non-null, it is assigned to the wrapper's public
+     * `$timeout` property (inherited from Laravel's Queueable trait).
+     * Laravel's queue worker reads the property at job pickup and calls
+     * `pcntl_alarm($timeout)` before invoking `handle()`; on SIGALRM the
+     * worker is killed and the wrapper lands in `failed_jobs`. The property
+     * is assigned only when non-null so `Bus::fake()` assertions observe
+     * `$job->timeout === null` as the default-unset signal.
      *
      * @param PipelineManifest $manifest The manifest whose `stepConfigs[0]` drives the dispatch branching.
      *
@@ -79,10 +82,16 @@ final class QueuedExecutor implements PipelineExecutor
      */
     private function dispatchFirstStep(PipelineManifest $manifest): void
     {
-        $config = $manifest->stepConfigs[0] ?? ['queue' => null, 'connection' => null, 'sync' => false];
+        $config = $manifest->stepConfigs[0] ?? ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
 
         if ((bool) $config['sync']) {
-            dispatch_sync(new PipelineStepJob($manifest));
+            $job = new PipelineStepJob($manifest);
+
+            if (($config['timeout'] ?? null) !== null) {
+                $job->timeout = $config['timeout'];
+            }
+
+            dispatch_sync($job);
 
             return;
         }
@@ -95,6 +104,10 @@ final class QueuedExecutor implements PipelineExecutor
 
         if ($config['connection'] !== null) {
             $job->onConnection($config['connection']);
+        }
+
+        if (($config['timeout'] ?? null) !== null) {
+            $job->timeout = $config['timeout'];
         }
 
         dispatch($job);

@@ -15,6 +15,7 @@ use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingThenSucceedingJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\HookRecorder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
@@ -30,6 +31,7 @@ beforeEach(function (): void {
     HookRecorder::reset();
     CompensateJobA::$executed = [];
     CompensateJobA::$onHandle = null;
+    FailingThenSucceedingJob::reset();
 });
 
 it('returns null when shouldBeQueued() is used', function (Closure $builderFactory): void {
@@ -690,5 +692,64 @@ it('default queue: declaration order is irrelevant (declared before any step sti
     Bus::assertDispatched(
         PipelineStepJob::class,
         fn (PipelineStepJob $job): bool => $job->queue === 'background',
+    );
+});
+
+// --- Story 7.2: per-step retry & timeout ---
+
+it('per-step retry (queued): in-process retry under sync queue driver', function (): void {
+    // The beforeEach sets the sync queue driver, so handle() runs inline and
+    // the in-process retry loop actually executes.
+    FailingThenSucceedingJob::reset();
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 1;
+
+    (new PipelineBuilder)
+        ->step(FailingThenSucceedingJob::class)->retry(2)
+        ->shouldBeQueued()
+        ->run();
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(2);
+});
+
+it('per-step retry (queued): dispatches wrapper with timeout property set', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)->timeout(60)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->timeout === 60,
+    );
+});
+
+it('per-step retry (queued): null timeout preserves Laravel default (no timeout set on wrapper)', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->step(TrackExecutionJobA::class)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->timeout === null,
+    );
+});
+
+it('default timeout: step inherits pipeline-level defaultTimeout', function (): void {
+    Bus::fake();
+
+    (new PipelineBuilder)
+        ->defaultTimeout(60)
+        ->step(TrackExecutionJobA::class)
+        ->shouldBeQueued()
+        ->run();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->timeout === 60,
     );
 });

@@ -153,7 +153,7 @@ final class PipelineManifest
      * @param array<int, string> $completedSteps List of completed step class names.
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so queued executors can decide whether to trigger compensation after a step failure.
-     * @param array<int, array{queue: ?string, connection: ?string, sync: bool}> $stepConfigs Per-step resolved queue / connection / sync configuration indexed by step position; populated at manifest creation time from each StepDefinition after pipeline-level default-queue / default-connection resolution (precedence: step override > pipeline default > null). Consumed by QueuedExecutor::execute() and PipelineStepJob::dispatchNextStep(); ignored by SyncExecutor and RecordingExecutor. Readonly because per-step config does not mutate during execution, paralleling stepClasses / stepConditions / compensationMapping.
+     * @param array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> $stepConfigs Per-step resolved queue / connection / sync / retry count / backoff delay (seconds) / wrapper timeout (seconds) configuration indexed by step position; populated at manifest creation time from each StepDefinition after pipeline-level default resolution (precedence: step override > pipeline default > null). Consumed by QueuedExecutor::execute(), PipelineStepJob::dispatchNextStep(), SyncExecutor::execute() (retry/backoff only), and PipelineStepJob::handle() (retry/backoff); `timeout` is honored in queued mode (wrapper `$timeout` property) and inert in sync / recording modes. Readonly because per-step config does not mutate during execution, paralleling stepClasses / stepConditions / compensationMapping.
      */
     public function __construct(
         public readonly string $pipelineId,
@@ -169,7 +169,7 @@ final class PipelineManifest
         public array $completedSteps,
         public ?PipelineContext $context,
         public FailStrategy $failStrategy = FailStrategy::StopImmediately,
-        /** @var array<int, array{queue: ?string, connection: ?string, sync: bool}> */
+        /** @var array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> */
         public readonly array $stepConfigs = [],
     ) {}
 
@@ -182,7 +182,7 @@ final class PipelineManifest
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
      * @param array<int, array{closure: SerializableClosure, negated: bool}> $stepConditions Per-step condition entries keyed by step index.
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so executors can decide whether to trigger compensation after a step failure.
-     * @param array<int, array{queue: ?string, connection: ?string, sync: bool}> $stepConfigs Per-step resolved queue / connection / sync configuration indexed by step position.
+     * @param array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> $stepConfigs Per-step resolved queue / connection / sync / retry / backoff / timeout configuration indexed by step position.
      *
      * @return self
      */

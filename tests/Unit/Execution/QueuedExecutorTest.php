@@ -146,3 +146,47 @@ it('uses dispatch_sync when stepConfigs[0] marks the first step as sync', functi
 
     Bus::assertDispatchedSync(PipelineStepJob::class);
 });
+
+it('applies $timeout on the wrapper when stepConfigs[0] carries a non-null timeout', function (): void {
+    Bus::fake();
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass(TrackExecutionJobA::class)],
+        shouldBeQueued: true,
+    );
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class],
+        context: new SimpleContext,
+        stepConfigs: [0 => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => 90]],
+    );
+
+    (new QueuedExecutor)->execute($definition, $manifest);
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->timeout === 90,
+    );
+});
+
+it('applies $timeout on the sync wrapper when stepConfigs[0] is sync + timeout', function (): void {
+    Bus::fake();
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass(TrackExecutionJobA::class)],
+        shouldBeQueued: true,
+    );
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class],
+        context: new SimpleContext,
+        stepConfigs: [0 => ['queue' => null, 'connection' => null, 'sync' => true, 'retry' => null, 'backoff' => null, 'timeout' => 90]],
+    );
+
+    (new QueuedExecutor)->execute($definition, $manifest);
+
+    Bus::assertDispatchedSync(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->timeout === 90,
+    );
+});

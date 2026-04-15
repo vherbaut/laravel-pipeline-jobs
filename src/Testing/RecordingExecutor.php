@@ -41,6 +41,13 @@ use Vherbaut\LaravelPipelineJobs\StepDefinition;
  * mode. Steps run inline in the current process; `stepConfigs` is preserved
  * on the manifest so future assertion helpers can introspect the declared
  * routing without mutating execution behavior.
+ *
+ * Per-step `retry`, `backoff`, and `timeout` are also INERT in recording
+ * mode. Each step is invoked exactly once via `app()->call([$job, 'handle'])`;
+ * retry loops would double the recorded step entries and mislead assertions
+ * like `assertStep(StepClass)->ran()`. The `stepConfigs` field is preserved
+ * on the manifest so assertion helpers (future) can introspect the declared
+ * retry / backoff / timeout policies.
  */
 final class RecordingExecutor implements PipelineExecutor
 {

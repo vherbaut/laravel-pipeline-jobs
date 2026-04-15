@@ -253,3 +253,41 @@ it('dispatchNextStep applies stepConfigs after a SkipAndContinue recovery', func
             && $job->manifest->currentStepIndex === 1,
     );
 });
+
+it('dispatchNextStep carries $timeout on the next wrapper when stepConfigs[nextIndex] has timeout', function (): void {
+    Bus::fake();
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class, TrackExecutionJobB::class],
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+            1 => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => 120],
+        ],
+    );
+
+    (new PipelineStepJob($manifest))->handle();
+
+    Bus::assertDispatched(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->timeout === 120,
+    );
+});
+
+it('dispatchNextStep carries $timeout on the sync next wrapper', function (): void {
+    Bus::fake();
+
+    $manifest = PipelineManifest::create(
+        stepClasses: [TrackExecutionJobA::class, TrackExecutionJobB::class],
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+            1 => ['queue' => null, 'connection' => null, 'sync' => true, 'retry' => null, 'backoff' => null, 'timeout' => 45],
+        ],
+    );
+
+    (new PipelineStepJob($manifest))->handle();
+
+    Bus::assertDispatchedSync(
+        PipelineStepJob::class,
+        fn (PipelineStepJob $job): bool => $job->timeout === 45,
+    );
+});

@@ -171,4 +171,98 @@ final class StepDefinition
             sync: $this->sync,
         );
     }
+
+    /**
+     * Return a new step definition with the given retry count applied.
+     *
+     * Immutable with-style: every other field is preserved bit-for-bit from
+     * the original instance. The count represents the number of RETRY
+     * attempts after the initial attempt (a value of 3 means 4 total
+     * attempts: 1 initial + 3 retries). Non-negative validation is the
+     * PipelineBuilder's responsibility.
+     *
+     * Zero semantics: `retry(0)` means "no retry" and has two distinct
+     * effects depending on pipeline-level defaults. When no `defaultRetry`
+     * is declared on the pipeline, `retry(0)` is equivalent to not calling
+     * this method at all (both resolve to null). When a non-null
+     * `defaultRetry(N)` IS declared, `retry(0)` explicitly OVERRIDES the
+     * pipeline default to opt this step out of retrying — `0 !== null`, so
+     * the manifest resolution `$step->retry ?? $definition->defaultRetry`
+     * preserves the 0 rather than falling through to the default.
+     *
+     * @param int $retry Number of retry attempts after the initial attempt (0 means no retry; explicitly overrides a pipeline-level defaultRetry).
+     *
+     * @return self A new StepDefinition with the retry override applied.
+     */
+    public function retry(int $retry): self
+    {
+        return new self(
+            jobClass: $this->jobClass,
+            compensationJobClass: $this->compensationJobClass,
+            condition: $this->condition,
+            conditionNegated: $this->conditionNegated,
+            queue: $this->queue,
+            connection: $this->connection,
+            retry: $retry,
+            backoff: $this->backoff,
+            timeout: $this->timeout,
+            sync: $this->sync,
+        );
+    }
+
+    /**
+     * Return a new step definition with the given backoff delay applied.
+     *
+     * Immutable with-style: every other field is preserved bit-for-bit. The
+     * value is the number of seconds to sleep between retry attempts and is
+     * only consulted when retry is non-null and greater than zero.
+     *
+     * @param int $backoff Seconds to sleep between retry attempts (0 means no sleep).
+     *
+     * @return self A new StepDefinition with the backoff override applied.
+     */
+    public function backoff(int $backoff): self
+    {
+        return new self(
+            jobClass: $this->jobClass,
+            compensationJobClass: $this->compensationJobClass,
+            condition: $this->condition,
+            conditionNegated: $this->conditionNegated,
+            queue: $this->queue,
+            connection: $this->connection,
+            retry: $this->retry,
+            backoff: $backoff,
+            timeout: $this->timeout,
+            sync: $this->sync,
+        );
+    }
+
+    /**
+     * Return a new step definition with the given wrapper timeout applied.
+     *
+     * Immutable with-style: every other field is preserved bit-for-bit. The
+     * value is the maximum execution time in seconds applied to the queued
+     * wrapper via its public `$timeout` property. Inert in synchronous and
+     * recording execution modes (see SyncExecutor and RecordingExecutor
+     * class-level PHPDoc).
+     *
+     * @param int $timeout Maximum execution time in seconds for the queued wrapper.
+     *
+     * @return self A new StepDefinition with the timeout override applied.
+     */
+    public function timeout(int $timeout): self
+    {
+        return new self(
+            jobClass: $this->jobClass,
+            compensationJobClass: $this->compensationJobClass,
+            condition: $this->condition,
+            conditionNegated: $this->conditionNegated,
+            queue: $this->queue,
+            connection: $this->connection,
+            retry: $this->retry,
+            backoff: $this->backoff,
+            timeout: $timeout,
+            sync: $this->sync,
+        );
+    }
 }
