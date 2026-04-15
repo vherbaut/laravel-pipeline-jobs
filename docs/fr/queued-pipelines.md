@@ -32,14 +32,14 @@ Tout ce qui voyage avec le pipeline doit être sérialisable.
 
 - **Propriétés du contexte.** Validées avant dispatch. Closures, ressources et classes anonymes déclenchent une exception `ContextSerializationFailed` immédiate.
 - **Closures de condition** (via `when()` / `unless()`). Encapsulées dans `SerializableClosure`. Les variables capturées via `use` doivent aussi être sérialisables.
-- **Closures de hooks et callbacks de cycle de vie.** Même contrainte. Voir [Hooks de cycle de vie](lifecycle-hooks-fr.md#notes-sur-le-mode-en-file-dattente).
+- **Closures de hooks et callbacks de cycle de vie.** Même contrainte. Voir [Hooks de cycle de vie](lifecycle-hooks.md#notes-sur-le-mode-en-file-dattente).
 
 Quand le prédicat ou le callback a besoin d'un état externe, chargez cet état dans une étape antérieure et lisez le depuis le contexte plutôt que de le capturer via `use`.
 
 ## Valeur de retour en mode queue
 
-Les exécutions en queue retournent toujours `null` car l'exécution est reportée aux workers. Toute closure `->return()` est ignorée en mode queue. Voir [Valeurs de retour](return-values-fr.md).
+Les exécutions en queue retournent toujours `null` car l'exécution est reportée aux workers. Toute closure `->return()` est ignorée en mode queue. Voir [Valeurs de retour](return-values.md).
 
 ## Compensation en mode queue
 
-Sous `FailStrategy::StopAndCompensate`, les jobs de compensation sont dispatchés en `Bus::chain` lors d'un échec. La chaîne s'arrête à la première compensation qui lève (divergence documentée avec le best effort synchrone). Voir [Pattern Saga](saga-compensation-fr.md).
+Sous `FailStrategy::StopAndCompensate`, les jobs de compensation sont dispatchés en `Bus::chain` lors d'un échec. La chaîne s'arrête à la première compensation qui lève (divergence documentée avec le best effort synchrone). Voir [Pattern Saga](saga-compensation.md).

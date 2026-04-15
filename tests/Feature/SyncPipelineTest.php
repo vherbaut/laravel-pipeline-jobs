@@ -3,12 +3,17 @@
 declare(strict_types=1);
 
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
+use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingThenSucceedingJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\HookRecorder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
@@ -19,6 +24,8 @@ use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobC;
 beforeEach(function (): void {
     TrackExecutionJob::$executionOrder = [];
     ReadContextJob::$readName = null;
+    FailingThenSucceedingJob::reset();
+    HookRecorder::reset();
 });
 
 it('executes all steps in order', function (Closure $builderFactory): void {
@@ -266,3 +273,181 @@ it('applies the most recent return closure when ->return() is called twice', fun
     'fluent API' => fn () => (new PipelineBuilder)
         ->step(IncrementCountJob::class),
 ]);
+
+it('per-step retry: step succeeds on second attempt after one failure', function () {
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 1;
+
+    (new PipelineBuilder)
+        ->step(FailingThenSucceedingJob::class)->retry(2)
+        ->run();
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(2);
+});
+
+it('per-step retry: step fails all attempts and surfaces final exception under StopImmediately', function () {
+    expect(fn () => (new PipelineBuilder)
+        ->step(FailingJob::class)->retry(2)
+        ->run()
+    )->toThrow(StepExecutionFailed::class);
+});
+
+it('per-step retry: backoff sleeps between attempts', function () {
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 1;
+
+    (new PipelineBuilder)
+        ->step(FailingThenSucceedingJob::class)->retry(1)->backoff(1)
+        ->run();
+
+    // Time-sensitive: asserts the second attempt occurred >= 1s after the first.
+    $timestamps = FailingThenSucceedingJob::$invocationTimestamps;
+    expect($timestamps)->toHaveCount(2)
+        ->and($timestamps[1] - $timestamps[0])->toBeGreaterThanOrEqual(1.0);
+});
+
+it('per-step retry: hooks fire ONCE per step, not per attempt', function () {
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 2;
+
+    (new PipelineBuilder)
+        ->step(FailingThenSucceedingJob::class)->retry(3)
+        ->beforeEach(function (StepDefinition $step) {
+            HookRecorder::$beforeEach[] = $step->jobClass;
+        })
+        ->afterEach(function (StepDefinition $step) {
+            HookRecorder::$afterEach[] = $step->jobClass;
+        })
+        ->onStepFailed(function (StepDefinition $step) {
+            HookRecorder::$onStepFailed[] = $step->jobClass;
+        })
+        ->run();
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(3)
+        ->and(HookRecorder::$beforeEach)->toHaveCount(1)
+        ->and(HookRecorder::$afterEach)->toHaveCount(1)
+        ->and(HookRecorder::$onStepFailed)->toHaveCount(0);
+});
+
+it('per-step retry: onStepFailed fires once on exhaustion under StopImmediately', function () {
+    try {
+        (new PipelineBuilder)
+            ->step(FailingJob::class)->retry(2)
+            ->onStepFailed(function (StepDefinition $step) {
+                HookRecorder::$onStepFailed[] = $step->jobClass;
+            })
+            ->run();
+    } catch (StepExecutionFailed) {
+        // expected
+    }
+
+    expect(HookRecorder::$onStepFailed)->toBe([FailingJob::class]);
+});
+
+it('per-step retry: retry under SkipAndContinue still calls onStepFailed once on exhaustion and advances', function () {
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 99; // always fails
+
+    (new PipelineBuilder)
+        ->step(FailingThenSucceedingJob::class)->retry(1)
+        ->step(TrackExecutionJobA::class)
+        ->onFailure(FailStrategy::SkipAndContinue)
+        ->onStepFailed(function (StepDefinition $step) {
+            HookRecorder::$onStepFailed[] = $step->jobClass;
+        })
+        ->run();
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(2)
+        ->and(HookRecorder::$onStepFailed)->toBe([FailingThenSucceedingJob::class])
+        ->and(TrackExecutionJob::$executionOrder)->toBe([TrackExecutionJobA::class]);
+});
+
+it('per-step retry: zero-overhead fast path when retry is null (single invocation)', function () {
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 0;
+
+    (new PipelineBuilder)
+        ->step(FailingThenSucceedingJob::class)
+        ->run();
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(1);
+});
+
+it('default retry: step without explicit retry inherits pipeline default', function () {
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 2;
+
+    (new PipelineBuilder)
+        ->defaultRetry(2)
+        ->step(FailingThenSucceedingJob::class)
+        ->run();
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(3);
+});
+
+it('default retry: explicit step-level retry overrides pipeline default', function () {
+    FailingThenSucceedingJob::$attemptsBeforeSuccess = 3;
+
+    (new PipelineBuilder)
+        ->defaultRetry(1)
+        ->step(FailingThenSucceedingJob::class)->retry(3)
+        ->run();
+
+    expect(FailingThenSucceedingJob::$invocationCount)->toBe(4);
+});
+
+it('default retry / backoff / timeout: declaration order independent', function () {
+    $definition = (new PipelineBuilder)
+        ->defaultRetry(2)
+        ->step(TrackExecutionJobA::class)
+        ->defaultBackoff(1)
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0]['retry'])->toBe(2)
+        ->and($configs[0]['backoff'])->toBe(1)
+        ->and($configs[0]['timeout'])->toBeNull();
+});
+
+it('dispatch: auto-executes on destruct in bare-statement form', function (): void {
+    Pipeline::dispatch([TrackExecutionJobA::class])->send(new SimpleContext);
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([TrackExecutionJobA::class]);
+});
+
+it('dispatch: produces identical step invocations to make()->run() with same config', function (): void {
+    $ctx = new SimpleContext;
+    Pipeline::make([TrackExecutionJobA::class, TrackExecutionJobB::class])->send($ctx)->run();
+    $fromMake = TrackExecutionJob::$executionOrder;
+
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::dispatch([TrackExecutionJobA::class, TrackExecutionJobB::class])->send($ctx);
+    $fromDispatch = TrackExecutionJob::$executionOrder;
+
+    expect($fromDispatch)->toBe($fromMake)
+        ->and($fromDispatch)->toBe([TrackExecutionJobA::class, TrackExecutionJobB::class]);
+});
+
+it('dispatch: propagates StepExecutionFailed from destruct identically to make()->run()', function (): void {
+    expect(fn () => Pipeline::dispatch([FailingJob::class])->send(new SimpleContext))
+        ->toThrow(StepExecutionFailed::class);
+});
+
+it('dispatch: pipelineContext() inside step jobs returns the same context sent via ->send()', function (): void {
+    $ctx = new SimpleContext;
+    $ctx->name = 'expected';
+
+    Pipeline::dispatch([ReadContextJob::class])->send($ctx);
+
+    expect(ReadContextJob::$readName)->toBe('expected');
+});
+
+it('dispatch: variable-scope form defers execution until variable destruction', function (): void {
+    $flag = null;
+
+    (function () use (&$flag): void {
+        $pending = Pipeline::dispatch([TrackExecutionJobA::class])->send(new SimpleContext);
+        $flag = TrackExecutionJob::$executionOrder;
+        unset($pending);
+    })();
+
+    // During the closure body, before unset(), the job had NOT run.
+    expect($flag)->toBe([])
+        ->and(TrackExecutionJob::$executionOrder)->toBe([TrackExecutionJobA::class]);
+});

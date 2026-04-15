@@ -139,6 +139,6 @@ Chaque étape lit et écrit dans le même objet contexte. Le contexte est un obj
 
 ## Pour aller plus loin
 
-- [Concepts clés](core-concepts-fr.md) pour les détails de `PipelineContext`, `PipelineBuilder` et des modes d'exécution.
-- [Jobs compatibles Pipeline](pipeline-aware-jobs-fr.md) pour les deux patterns (trait vs propriété explicite) qui relient une étape au contexte.
-- [Référence API](api-reference-fr.md) pour le catalogue complet des méthodes.
+- [Concepts clés](core-concepts.md) pour les détails de `PipelineContext`, `PipelineBuilder` et des modes d'exécution.
+- [Jobs compatibles Pipeline](pipeline-aware-jobs.md) pour les deux patterns (trait vs propriété explicite) qui relient une étape au contexte.
+- [Référence API](api-reference.md) pour le catalogue complet des méthodes.

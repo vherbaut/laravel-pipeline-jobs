@@ -36,6 +36,20 @@ use Vherbaut\LaravelPipelineJobs\StepDefinition;
  * reverse order of the completed steps before rethrowing, so each
  * compensation runs on a fresh worker with standard Laravel retry.
  *
+ * Each next-step dispatch consults `stepConfigs[nextIndex]` to select
+ * queue, connection, and sync-vs-async mode via `dispatchNextStep()`. When
+ * the upcoming step is marked sync, the helper calls `dispatch_sync` so the
+ * inline wrapper runs in the current worker's process before `handle()` returns.
+ *
+ * The step invocation is wrapped in an in-process retry loop driven by
+ * `stepConfigs[currentStepIndex]`. When `retry > 0`, a failed `handle()` is
+ * re-invoked up to `retry` additional times with `sleep($backoff)` between
+ * attempts; the final attempt's exception propagates into the FailStrategy
+ * branching. The wrapper's native `$tries` remains locked to 1 — retry is
+ * SEMANTIC, not structural. The `timeout` value is applied at dispatch time
+ * on the wrapper's public `$timeout` property (see `dispatchNextStep()` and
+ * QueuedExecutor::dispatchFirstStep()).
+ *
  * @internal
  */
 final class PipelineStepJob implements ShouldQueue
@@ -55,6 +69,19 @@ final class PipelineStepJob implements ShouldQueue
      * @var int
      */
     public int $tries = 1;
+
+    /**
+     * Per-step wrapper timeout in seconds, read by Laravel's queue worker.
+     *
+     * Assigned at dispatch time by QueuedExecutor::dispatchFirstStep() and
+     * PipelineStepJob::dispatchNextStep() when the resolved step config
+     * carries a non-null timeout. Laravel's worker reads this property at
+     * job pickup and calls `pcntl_alarm($timeout)` before invoking
+     * `handle()`. Null means "use Laravel's default worker timeout".
+     *
+     * @var int|null
+     */
+    public ?int $timeout = null;
 
     /**
      * Create a new pipeline step job.
@@ -130,7 +157,7 @@ final class PipelineStepJob implements ShouldQueue
                 $this->manifest->advanceStep();
 
                 if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
-                    dispatch(new self($this->manifest));
+                    $this->dispatchNextStep();
 
                     return;
                 }
@@ -158,7 +185,7 @@ final class PipelineStepJob implements ShouldQueue
                 $this->manifest->context,
             );
 
-            app()->call([$job, 'handle']);
+            $this->invokeStepWithRetry($job);
 
             // Story 6.1 Task 6.4: afterEach fires INSIDE the try block so a
             // throwing afterEach is caught by the standard failure path
@@ -203,7 +230,10 @@ final class PipelineStepJob implements ShouldQueue
 
                 if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
                     try {
-                        dispatch(new self($this->manifest));
+                        // dispatch_sync may also throw here under Story 7.1's
+                        // sync-step branch; the same catch block handles both
+                        // because dispatch_sync surfaces exceptions synchronously.
+                        $this->dispatchNextStep();
                     } catch (Throwable $dispatchException) {
                         // If dispatch() itself throws (queue driver unavailable,
                         // serialization failure), Laravel's default handling lands
@@ -303,7 +333,7 @@ final class PipelineStepJob implements ShouldQueue
         $this->manifest->failedStepIndex = null;
 
         if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
-            dispatch(new self($this->manifest));
+            $this->dispatchNextStep();
 
             return;
         }
@@ -343,6 +373,144 @@ final class PipelineStepJob implements ShouldQueue
         $shouldRun = $entry['negated'] ? ! $result : $result;
 
         return ! $shouldRun;
+    }
+
+    /**
+     * Invoke the step's handle() method with an in-process retry loop.
+     *
+     * Reads the per-step configuration from
+     * `$this->manifest->stepConfigs[$this->manifest->currentStepIndex]`.
+     * Fast path: when retry is null or zero, `app()->call([$job, 'handle'])`
+     * runs once — zero retry-loop overhead when retry is unset. Retry path:
+     * `retry + 1` attempts with `sleep($backoff)` between non-final attempts.
+     * The final attempt's exception propagates to the outer catch where
+     * FailStrategy branching takes over.
+     *
+     * Instance-reuse contract: the step `$job` is resolved ONCE by the
+     * caller (`app()->make($stepClass)`) before this helper runs; the SAME
+     * instance receives every retry attempt. Instance-level state
+     * (counters, accumulators, cached service handles) persists across
+     * attempts. This differs from Laravel's native queue retry which
+     * re-resolves per attempt because it crosses process boundaries; the
+     * in-process retry here stays inside one PHP process and therefore
+     * preserves the instance. Users relying on step-local state should
+     * expect this semantic.
+     *
+     * The retry loop runs inside the CURRENT worker's PHP process. Each
+     * attempt blocks the worker for `sleep($backoff)` seconds plus the
+     * attempt's runtime. A cumulative attempts + backoffs window exceeding
+     * the wrapper's `$timeout` (when set by the dispatch helper) triggers
+     * `SIGALRM` termination mid-retry — the in-process loop does not
+     * protect against timeout.
+     *
+     * The `timeout` value from the config is intentionally NOT consulted
+     * here; it is applied at dispatch time on the wrapper's public
+     * `$timeout` property, which Laravel's worker reads via `pcntl_alarm()`.
+     *
+     * @param object $job The resolved step job instance (already has manifest injected when applicable).
+     * @return void
+     *
+     * @throws Throwable The final attempt's exception when the retry loop exhausts.
+     */
+    private function invokeStepWithRetry(object $job): void
+    {
+        $config = $this->manifest->stepConfigs[$this->manifest->currentStepIndex]
+            ?? ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
+
+        $retry = $config['retry'] ?? null;
+
+        if ($retry === null || $retry === 0) {
+            app()->call([$job, 'handle']);
+
+            return;
+        }
+
+        $backoff = $config['backoff'] ?? 0;
+        $maxAttempts = $retry + 1;
+        $attempt = 0;
+
+        while (true) {
+            $attempt++;
+
+            try {
+                app()->call([$job, 'handle']);
+
+                return;
+            } catch (Throwable $exception) {
+                if ($attempt >= $maxAttempts) {
+                    throw $exception;
+                }
+
+                if ($backoff > 0) {
+                    sleep($backoff);
+                }
+            }
+        }
+    }
+
+    /**
+     * Dispatch the next PipelineStepJob wrapper, applying per-step config.
+     *
+     * Resolves `$this->manifest->stepConfigs[$this->manifest->currentStepIndex]`
+     * which, by the time this helper is called, has been advanced by the
+     * caller to point at the UPCOMING step's config index. Applies the same
+     * branching logic as QueuedExecutor::dispatchFirstStep():
+     *
+     * - `sync === true` → `dispatch_sync()`: runs the next wrapper
+     *   synchronously in the current worker's process; `handle()` does not
+     *   return until the inline wrapper fully executes. Exceptions propagate
+     *   synchronously. When a `timeout` is declared, it is still assigned on
+     *   the wrapper (inert observationally because `dispatch_sync` does not
+     *   install a `pcntl_alarm`) so test assertions observe the declared
+     *   value on both branches symmetrically.
+     * - `sync === false` with explicit queue / connection → the job is
+     *   configured via `onQueue()` / `onConnection()` before `dispatch()`
+     *   is called.
+     * - `sync === false` with null queue / connection → no-op mutations.
+     *
+     * The `timeout` config key, when non-null, is assigned to the wrapper's
+     * public `$timeout` property (inherited from Laravel's Queueable trait).
+     * Laravel's queue worker reads the property at job pickup and calls
+     * `pcntl_alarm($timeout)` before invoking `handle()`; on SIGALRM the
+     * worker is killed and the wrapper lands in `failed_jobs`. The
+     * wrapper's `$tries` remains locked to 1 regardless of the per-step
+     * retry config (retry is delivered via the in-process loop in
+     * `invokeStepWithRetry()`, not via Laravel's wrapper-level retry).
+     *
+     * @return void
+     */
+    private function dispatchNextStep(): void
+    {
+        $config = $this->manifest->stepConfigs[$this->manifest->currentStepIndex]
+            ?? ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
+
+        if ((bool) $config['sync']) {
+            $job = new self($this->manifest);
+
+            if (($config['timeout'] ?? null) !== null) {
+                $job->timeout = $config['timeout'];
+            }
+
+            dispatch_sync($job);
+
+            return;
+        }
+
+        $job = new self($this->manifest);
+
+        if ($config['queue'] !== null) {
+            $job->onQueue($config['queue']);
+        }
+
+        if ($config['connection'] !== null) {
+            $job->onConnection($config['connection']);
+        }
+
+        if (($config['timeout'] ?? null) !== null) {
+            $job->timeout = $config['timeout'];
+        }
+
+        dispatch($job);
     }
 
     /**

@@ -124,3 +124,26 @@ it('stores onSuccess/onFailure/onComplete callbacks passed at construction', fun
         ->and($definition->onFailure)->toBe($onFailure)
         ->and($definition->onComplete)->toBe($onComplete);
 });
+
+it('defaults retry/backoff/timeout pipeline-wide defaults to null', function () {
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass('App\\Jobs\\Step')],
+    );
+
+    expect($definition->defaultRetry)->toBeNull()
+        ->and($definition->defaultBackoff)->toBeNull()
+        ->and($definition->defaultTimeout)->toBeNull();
+});
+
+it('stores pipeline-wide defaultRetry/defaultBackoff/defaultTimeout passed at construction', function () {
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass('App\\Jobs\\Step')],
+        defaultRetry: 2,
+        defaultBackoff: 5,
+        defaultTimeout: 60,
+    );
+
+    expect($definition->defaultRetry)->toBe(2)
+        ->and($definition->defaultBackoff)->toBe(5)
+        ->and($definition->defaultTimeout)->toBe(60);
+});
