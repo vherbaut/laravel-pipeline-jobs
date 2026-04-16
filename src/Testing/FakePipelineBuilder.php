@@ -11,6 +11,7 @@ use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -70,6 +71,42 @@ final class FakePipelineBuilder
     public function addStep(StepDefinition $step): static
     {
         $this->builder->addStep($step);
+
+        return $this;
+    }
+
+    /**
+     * Append a pre-built ParallelStepGroup to the pipeline.
+     *
+     * Delegates to the underlying PipelineBuilder so the recorded
+     * PipelineDefinition carries the parallel group at its outer position
+     * for assertion purposes. In Pipeline::fake() default mode the pipeline
+     * does not execute; in recording mode the RecordingExecutor replays
+     * sub-steps sequentially identically to SyncExecutor.
+     *
+     * @param ParallelStepGroup $group Pre-built parallel group containing at least one sub-step.
+     * @return static
+     */
+    public function addParallelGroup(ParallelStepGroup $group): static
+    {
+        $this->builder->addParallelGroup($group);
+
+        return $this;
+    }
+
+    /**
+     * Append a parallel step group built from class-strings or StepDefinition instances.
+     *
+     * Fluent shorthand for addParallelGroup(ParallelStepGroup::fromArray($jobs)).
+     *
+     * @param array<int, class-string|StepDefinition> $jobs Sub-step class-strings or pre-built StepDefinition instances.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $jobs is empty or contains an unsupported item type.
+     */
+    public function parallel(array $jobs): static
+    {
+        $this->builder->parallel($jobs);
 
         return $this;
     }
@@ -619,14 +656,55 @@ final class FakePipelineBuilder
      */
     private function executeWithRecording(PipelineDefinition $definition, ?PipelineContext $resolvedContext): ?PipelineContext
     {
-        $stepClasses = array_map(
-            fn (StepDefinition $step): string => $step->jobClass,
-            $definition->steps,
-        );
+        $stepClasses = [];
+
+        foreach ($definition->steps as $index => $step) {
+            if ($step instanceof ParallelStepGroup) {
+                $stepClasses[$index] = [
+                    'type' => 'parallel',
+                    'classes' => array_map(
+                        static fn (StepDefinition $subStep): string => $subStep->jobClass,
+                        $step->steps,
+                    ),
+                ];
+
+                continue;
+            }
+
+            $stepClasses[$index] = $step->jobClass;
+        }
 
         $stepConditions = [];
 
         foreach ($definition->steps as $index => $step) {
+            if ($step instanceof ParallelStepGroup) {
+                $entries = [];
+                $hasAny = false;
+
+                foreach ($step->steps as $subIndex => $subStep) {
+                    if ($subStep->condition === null) {
+                        $entries[$subIndex] = null;
+
+                        continue;
+                    }
+
+                    $entries[$subIndex] = [
+                        'closure' => new SerializableClosure($subStep->condition),
+                        'negated' => $subStep->conditionNegated,
+                    ];
+                    $hasAny = true;
+                }
+
+                if ($hasAny) {
+                    $stepConditions[$index] = [
+                        'type' => 'parallel',
+                        'entries' => $entries,
+                    ];
+                }
+
+                continue;
+            }
+
             if ($step->condition === null) {
                 continue;
             }

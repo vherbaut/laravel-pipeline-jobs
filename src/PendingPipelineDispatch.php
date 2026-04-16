@@ -203,6 +203,38 @@ class PendingPipelineDispatch
     }
 
     /**
+     * Proxies PipelineBuilder::addParallelGroup() and returns the wrapper for chainability.
+     *
+     * Append a pre-built ParallelStepGroup to the pipeline.
+     *
+     * @param ParallelStepGroup $group Pre-built parallel group containing at least one sub-step.
+     * @return static
+     */
+    public function addParallelGroup(ParallelStepGroup $group): static
+    {
+        $this->builder->addParallelGroup($group);
+
+        return $this;
+    }
+
+    /**
+     * Proxies PipelineBuilder::parallel() and returns the wrapper for chainability.
+     *
+     * Append a parallel step group built from class-strings or StepDefinition instances.
+     *
+     * @param array<int, class-string|StepDefinition> $jobs Sub-step class-strings or pre-built StepDefinition instances (at least one).
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $jobs is empty or contains an unsupported item type.
+     */
+    public function parallel(array $jobs): static
+    {
+        $this->builder->parallel($jobs);
+
+        return $this;
+    }
+
+    /**
      * Proxies PipelineBuilder::when() and returns the wrapper for chainability.
      *
      * Append a step that only runs when the condition evaluates to true.

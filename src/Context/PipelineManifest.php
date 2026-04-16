@@ -146,47 +146,48 @@ final class PipelineManifest
      *
      * @param string $pipelineId Unique identifier for this pipeline run (UUID).
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
-     * @param array<int, string> $stepClasses Ordered list of job class names.
+     * @param array<int, string|array{type: string, classes: array<int, string>}> $stepClasses Ordered list of job class names. Parallel-group positions carry a nested `['type' => 'parallel', 'classes' => array<int, string>]` shape in lieu of a flat class-string.
      * @param array<string, string> $compensationMapping Map of step class name to compensation class name.
-     * @param array<int, array{closure: SerializableClosure, negated: bool}> $stepConditions Per-step condition entries keyed by step index.
+     * @param array<int, array{closure: SerializableClosure, negated: bool}|array{type: string, entries: array<int, array{closure: SerializableClosure, negated: bool}|null>}> $stepConditions Per-step condition entries keyed by step index. Parallel groups carry a nested `['type' => 'parallel', 'entries' => [...]]` shape where each inner entry is the flat shape or null for an unconditional sub-step.
      * @param int $currentStepIndex Index of the current step being executed.
      * @param array<int, string> $completedSteps List of completed step class names.
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so queued executors can decide whether to trigger compensation after a step failure.
-     * @param array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> $stepConfigs Per-step resolved queue / connection / sync / retry count / backoff delay (seconds) / wrapper timeout (seconds) configuration indexed by step position; populated at manifest creation time from each StepDefinition after pipeline-level default resolution (precedence: step override > pipeline default > null). Consumed by QueuedExecutor::execute(), PipelineStepJob::dispatchNextStep(), SyncExecutor::execute() (retry/backoff only), and PipelineStepJob::handle() (retry/backoff); `timeout` is honored in queued mode (wrapper `$timeout` property) and inert in sync / recording modes. Readonly because per-step config does not mutate during execution, paralleling stepClasses / stepConditions / compensationMapping.
+     * @param array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}|array{type: string, configs: array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}>}> $stepConfigs Per-step resolved queue / connection / sync / retry count / backoff delay (seconds) / wrapper timeout (seconds) configuration indexed by step position. Parallel groups carry a nested `['type' => 'parallel', 'configs' => [...]]` shape where each inner entry is the flat config shape per sub-step.
      */
     public function __construct(
         public readonly string $pipelineId,
         public readonly ?string $pipelineName,
-        /** @var array<int, string> */
+        /** @var array<int, string|array{type: string, classes: array<int, string>}> */
         public readonly array $stepClasses,
         /** @var array<string, string> */
         public readonly array $compensationMapping,
-        /** @var array<int, array{closure: SerializableClosure, negated: bool}> */
+        /** @var array<int, array{closure: SerializableClosure, negated: bool}|array{type: string, entries: array<int, array{closure: SerializableClosure, negated: bool}|null>}> */
         public readonly array $stepConditions,
         public int $currentStepIndex,
         /** @var array<int, string> */
         public array $completedSteps,
         public ?PipelineContext $context,
         public FailStrategy $failStrategy = FailStrategy::StopImmediately,
-        /** @var array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> */
+        /** @var array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}|array{type: string, configs: array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}>}> */
         public readonly array $stepConfigs = [],
     ) {}
 
     /**
      * Create a new pipeline manifest with auto-generated UUID and default execution state.
      *
-     * @param array<int, string> $stepClasses Ordered list of job class names.
+     * @param array<int, string|array{type: string, classes: array<int, string>}> $stepClasses Ordered list of job class names; parallel positions carry a nested shape.
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param array<string, string> $compensationMapping Map of step class name to compensation class name.
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
-     * @param array<int, array{closure: SerializableClosure, negated: bool}> $stepConditions Per-step condition entries keyed by step index.
+     * @param array<int, array{closure: SerializableClosure, negated: bool}|array{type: string, entries: array<int, array{closure: SerializableClosure, negated: bool}|null>}> $stepConditions Per-step condition entries keyed by step index; parallel groups carry a nested shape.
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so executors can decide whether to trigger compensation after a step failure.
-     * @param array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> $stepConfigs Per-step resolved queue / connection / sync / retry / backoff / timeout configuration indexed by step position.
+     * @param array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}|array{type: string, configs: array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}>}> $stepConfigs Per-step resolved queue / connection / sync / retry / backoff / timeout configuration indexed by step position; parallel positions carry a nested shape.
      *
      * @return self
      */
     public static function create(
+        /** @var array<int, string|array{type: string, classes: array<int, string>}> */
         array $stepClasses,
         ?PipelineContext $context = null,
         array $compensationMapping = [],

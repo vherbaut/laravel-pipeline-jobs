@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Vherbaut\LaravelPipelineJobs\Execution;
 
+use Illuminate\Bus\Batch;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Laravel\SerializableClosure\SerializableClosure;
 use ReflectionProperty;
@@ -151,6 +153,18 @@ final class PipelineStepJob implements ShouldQueue
         }
 
         $stepClass = $this->manifest->stepClasses[$stepIndex];
+
+        if (is_array($stepClass)) {
+            // Parallel-group position: the manifest's declared type
+            // (`array{type: 'parallel', classes: array<int, string>}`)
+            // guarantees the shape, so no runtime check is needed. Hook
+            // firing is delegated to ParallelStepJob::handle() per
+            // sub-step (the outer wrapper fires no hooks for a parallel
+            // position).
+            $this->dispatchParallelBatch($stepIndex, $stepClass['classes']);
+
+            return;
+        }
 
         try {
             if ($this->shouldSkip($stepIndex)) {
@@ -481,10 +495,23 @@ final class PipelineStepJob implements ShouldQueue
      */
     private function dispatchNextStep(): void
     {
-        $config = $this->manifest->stepConfigs[$this->manifest->currentStepIndex]
-            ?? ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
+        $config = $this->manifest->stepConfigs[$this->manifest->currentStepIndex] ?? null;
 
-        if ((bool) $config['sync']) {
+        // Parallel-group positions carry a nested config shape and no
+        // per-wrapper queue/connection/timeout: the outer wrapper's sole
+        // responsibility is to detect the parallel shape in handle() and
+        // fan out via dispatchParallelBatch(). Dispatch as a plain wrapper.
+        if (is_array($config) && ($config['type'] ?? null) === 'parallel') {
+            dispatch(new self($this->manifest));
+
+            return;
+        }
+
+        $config = is_array($config)
+            ? $config
+            : ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
+
+        if ((bool) ($config['sync'] ?? false)) {
             $job = new self($this->manifest);
 
             if (($config['timeout'] ?? null) !== null) {
@@ -498,11 +525,11 @@ final class PipelineStepJob implements ShouldQueue
 
         $job = new self($this->manifest);
 
-        if ($config['queue'] !== null) {
+        if (($config['queue'] ?? null) !== null) {
             $job->onQueue($config['queue']);
         }
 
-        if ($config['connection'] !== null) {
+        if (($config['connection'] ?? null) !== null) {
             $job->onConnection($config['connection']);
         }
 
@@ -581,6 +608,401 @@ final class PipelineStepJob implements ShouldQueue
         }
 
         $closure($context, $exception);
+    }
+
+    /**
+     * Dispatch a Bus::batch fan-out for one parallel group and register the fan-in continuation.
+     *
+     * Builds one ParallelStepJob wrapper per sub-step, each carrying its own
+     * deep-clone of the manifest (and therefore its own PipelineContext
+     * clone) so sub-steps run with no shared mutable state during the batch
+     * window. Applies per-sub-step queue/connection/timeout overrides from
+     * the nested $stepConfigs[$groupIndex]['configs'] shape before pushing
+     * each wrapper into the batch.
+     *
+     * The batch is configured with:
+     *  - `->name("pipeline:{pipelineId}:parallel:{groupIndex}")` for Horizon
+     *    observability.
+     *  - `->allowFailures()` so siblings run to completion under any fail
+     *    strategy; FailStrategy branching happens in the `then` continuation.
+     *  - `->then($closure)` registered as a SerializableClosure-wrapped
+     *    callable capturing the group index, sub-step count, outer manifest
+     *    snapshot, and pre-batch context baseline. The closure recovers
+     *    per-sub-step final contexts from cache via
+     *    ParallelStepJob::contextCacheKey(), merges them via
+     *    ParallelContextMerger::merge(), rebuilds a fresh manifest with the
+     *    merged context, and either dispatches the next PipelineStepJob (on
+     *    success or SkipAndContinue), dispatches the compensation chain (on
+     *    StopAndCompensate), or fires terminal onFailure/onComplete
+     *    callbacks (on StopImmediately). The fan-in closure treats a
+     *    failed-batch-under-SkipAndContinue as a continuation event.
+     *
+     * The outer PipelineStepJob returns immediately after the batch is
+     * dispatched; the next-step dispatch lives entirely inside the `then`
+     * callback to avoid racing with the asynchronous batch completion.
+     *
+     * @param int $groupIndex The outer pipeline position of the parallel group.
+     * @param array<int, string> $subStepClasses Sub-step class-strings in declaration order.
+     * @return void
+     */
+    private function dispatchParallelBatch(int $groupIndex, array $subStepClasses): void
+    {
+        $baselineContext = $this->manifest->context === null
+            ? null
+            : unserialize(serialize($this->manifest->context));
+
+        $jobs = [];
+
+        foreach ($subStepClasses as $subIndex => $subStepClass) {
+            /** @var PipelineManifest $clonedManifest */
+            $clonedManifest = unserialize(serialize($this->manifest));
+
+            $wrapper = new ParallelStepJob(
+                manifest: $clonedManifest,
+                groupIndex: $groupIndex,
+                subStepIndex: $subIndex,
+                stepClass: $subStepClass,
+            );
+
+            $config = $this->resolveParallelSubConfig($groupIndex, $subIndex);
+
+            if ($config['queue'] !== null) {
+                $wrapper->onQueue($config['queue']);
+            }
+
+            if ($config['connection'] !== null) {
+                $wrapper->onConnection($config['connection']);
+            }
+
+            if ($config['timeout'] !== null) {
+                $wrapper->timeout = $config['timeout'];
+            }
+
+            $jobs[] = $wrapper;
+        }
+
+        $pipelineId = $this->manifest->pipelineId;
+        $outerManifestSnapshot = unserialize(serialize($this->manifest));
+        $subCount = count($subStepClasses);
+
+        $thenCallback = new SerializableClosure(function (Batch $batch) use (
+            $outerManifestSnapshot,
+            $baselineContext,
+            $pipelineId,
+            $groupIndex,
+            $subStepClasses,
+            $subCount,
+        ): void {
+            PipelineStepJob::finalizeParallelBatch(
+                $batch,
+                $outerManifestSnapshot,
+                $baselineContext,
+                $pipelineId,
+                $groupIndex,
+                $subStepClasses,
+                $subCount,
+            );
+        });
+
+        // Observability hook: log the first batch-job failure so operators
+        // get an early signal before the `then` callback's aggregate pass.
+        // Under allowFailures() Laravel still runs `then` after all jobs
+        // complete, so `catch` is additive observability, not control flow.
+        $catchCallback = new SerializableClosure(function (Batch $batch, Throwable $exception) use ($pipelineId, $groupIndex): void {
+            Log::warning('Pipeline parallel batch caught a sub-step failure', [
+                'pipelineId' => $pipelineId,
+                'groupIndex' => $groupIndex,
+                'exception' => $exception->getMessage(),
+            ]);
+        });
+
+        try {
+            Bus::batch($jobs)
+                ->name("pipeline:{$pipelineId}:parallel:{$groupIndex}")
+                ->allowFailures()
+                ->then($thenCallback->getClosure())
+                ->catch($catchCallback->getClosure())
+                ->dispatch();
+        } catch (Throwable $dispatchException) {
+            Log::error('Pipeline parallel batch dispatch failed', [
+                'pipelineId' => $pipelineId,
+                'groupIndex' => $groupIndex,
+                'exception' => $dispatchException->getMessage(),
+            ]);
+
+            throw $dispatchException;
+        }
+    }
+
+    /**
+     * Finalize a parallel batch's fan-in: merge contexts, apply FailStrategy, and continue the pipeline.
+     *
+     * Exposed as a public static method so the dispatchParallelBatch()
+     * SerializableClosure has a stable call-site to forward to. Recovers
+     * per-sub-step final contexts from Laravel cache (written by
+     * ParallelStepJob::handle()), merges them into the baseline via
+     * ParallelContextMerger, clears the cache entries, and branches on the
+     * manifest's FailStrategy when the batch reports failures:
+     *  - Under StopAndCompensate or StopImmediately with any failure, fires
+     *    onFailure then onComplete and does NOT dispatch the next step.
+     *    StopAndCompensate additionally dispatches the reversed
+     *    CompensationStepJob chain (flat $completedSteps drives the
+     *    selection; successful sub-steps in this group ARE included).
+     *  - Under SkipAndContinue (or any strategy with no failures) the merged
+     *    manifest is advanced past the group and the next PipelineStepJob
+     *    is dispatched via dispatchNextStep() (which re-enters the standard
+     *    per-step config resolution for the upcoming position).
+     *  - When the group is the last step in the pipeline, the merged
+     *    manifest's success tail fires onSuccess then onComplete to match
+     *    the queued-mode terminal-callback contract.
+     *
+     * Runs on whichever worker picks up the batch-finalization job; Laravel
+     * guarantees this runs exactly once per batch.
+     *
+     * @internal Public-static is required only so dispatchParallelBatch()'s SerializableClosure has a stable forwarding target; callers outside this package should not invoke it directly.
+     *
+     * @param Batch $batch The completed batch instance (carries hasFailures() observability).
+     * @param PipelineManifest $outerManifestSnapshot A pre-batch clone of the outer manifest captured at dispatch time.
+     * @param PipelineContext|null $baselineContext The pre-batch context clone used as the merger's baseline.
+     * @param string $pipelineId The enclosing pipeline run identifier.
+     * @param int $groupIndex The outer position of the parallel group.
+     * @param array<int, string> $subStepClasses Sub-step class-strings in declaration order.
+     * @param int $subCount Number of sub-steps dispatched in the batch.
+     * @return void
+     */
+    public static function finalizeParallelBatch(
+        Batch $batch,
+        PipelineManifest $outerManifestSnapshot,
+        ?PipelineContext $baselineContext,
+        string $pipelineId,
+        int $groupIndex,
+        array $subStepClasses,
+        int $subCount,
+    ): void {
+        $finalContexts = [];
+        $succeededIndices = [];
+
+        // Read (without deleting) the succeeded signal and the optional
+        // context entry. Cache::get + Cache::forget (instead of Cache::pull)
+        // leaves the entry readable if the `then` callback retries after a
+        // downstream dispatch failure; the explicit forget at the end of the
+        // loop still cleans up on the normal path.
+        for ($i = 0; $i < $subCount; $i++) {
+            $succeededKey = ParallelStepJob::succeededCacheKey($pipelineId, $groupIndex, $i);
+            $contextKey = ParallelStepJob::contextCacheKey($pipelineId, $groupIndex, $i);
+
+            $succeededIndices[$i] = Cache::get($succeededKey) === true;
+
+            if ($succeededIndices[$i]) {
+                $cached = Cache::get($contextKey);
+                $finalContexts[$i] = $cached instanceof PipelineContext ? $cached : null;
+            } else {
+                $finalContexts[$i] = null;
+            }
+
+            Cache::forget($succeededKey);
+            Cache::forget($contextKey);
+        }
+
+        $mergedContext = ParallelContextMerger::merge(
+            $baselineContext,
+            $finalContexts,
+            $pipelineId,
+            $groupIndex,
+        );
+
+        $manifest = $outerManifestSnapshot;
+        $manifest->context = $mergedContext;
+
+        // Drive markStepCompleted from the succeeded signal (works for both
+        // context-less pipelines and contexts that legitimately come back
+        // null) rather than from context presence alone.
+        foreach ($subStepClasses as $subIndex => $subStepClass) {
+            if (($succeededIndices[$subIndex] ?? false) === true) {
+                $manifest->markStepCompleted($subStepClass);
+            }
+        }
+
+        $hasFailures = $batch->hasFailures();
+        $strategy = $manifest->failStrategy;
+
+        if ($hasFailures && $strategy !== FailStrategy::SkipAndContinue) {
+            // Record the group-level failure index so downstream
+            // CompensationStepJob handlers (and debuggers) can introspect
+            // $manifest->failedStepIndex to find the parallel-group position.
+            // failedStepClass is left unset because Bus::batch()'s fan-in API
+            // does not expose per-job classes to the then/catch callbacks.
+            $manifest->failedStepIndex = $groupIndex;
+
+            $failureException = new StepExecutionFailed(
+                "Pipeline [{$pipelineId}] parallel group at position {$groupIndex} failed under {$strategy->name}.",
+            );
+
+            Log::error('Pipeline parallel batch reported failures', [
+                'pipelineId' => $pipelineId,
+                'groupIndex' => $groupIndex,
+                'failedCount' => $batch->failedJobs,
+                'strategy' => $strategy->name,
+            ]);
+
+            if ($strategy === FailStrategy::StopAndCompensate) {
+                self::dispatchCompensationChainFor($manifest);
+            }
+
+            // Wrap the callback invocations so a throwing user callback is
+            // logged with full fan-in context rather than raw-propagating
+            // out of the batch-then worker. The fan-in path is terminal:
+            // rethrowing here would land the then-callback job in
+            // failed_jobs without any recovery path, so we log and continue
+            // to onComplete.
+            if ($manifest->onFailureCallback !== null) {
+                try {
+                    ($manifest->onFailureCallback->getClosure())($manifest->context, $failureException);
+                } catch (Throwable $callbackException) {
+                    Log::error('Pipeline onFailure callback threw during parallel fan-in', [
+                        'pipelineId' => $pipelineId,
+                        'groupIndex' => $groupIndex,
+                        'exception' => $callbackException->getMessage(),
+                    ]);
+                }
+            }
+
+            if ($manifest->onCompleteCallback !== null) {
+                try {
+                    ($manifest->onCompleteCallback->getClosure())($manifest->context);
+                } catch (Throwable $callbackException) {
+                    Log::error('Pipeline onComplete callback threw during parallel fan-in', [
+                        'pipelineId' => $pipelineId,
+                        'groupIndex' => $groupIndex,
+                        'exception' => $callbackException->getMessage(),
+                    ]);
+                }
+            }
+
+            return;
+        }
+
+        // No terminal failure: advance past the group before dispatching
+        // the next step or firing the success tail. Placing advanceStep()
+        // AFTER the hasFailures() branch preserves the "failed group stays
+        // at its position" invariant that mirrors the sync path (failures
+        // leave currentStepIndex pointing at the failing group for
+        // observability / downstream diagnostics).
+        $manifest->advanceStep();
+
+        if ($manifest->currentStepIndex < count($manifest->stepClasses)) {
+            $nextJob = new self($manifest);
+
+            $nextConfig = $manifest->stepConfigs[$manifest->currentStepIndex] ?? null;
+
+            if (is_array($nextConfig) && ! isset($nextConfig['type'])) {
+                if (($nextConfig['queue'] ?? null) !== null) {
+                    $nextJob->onQueue($nextConfig['queue']);
+                }
+
+                if (($nextConfig['connection'] ?? null) !== null) {
+                    $nextJob->onConnection($nextConfig['connection']);
+                }
+
+                if (($nextConfig['timeout'] ?? null) !== null) {
+                    $nextJob->timeout = $nextConfig['timeout'];
+                }
+
+                if ((bool) $nextConfig['sync']) {
+                    dispatch_sync($nextJob);
+
+                    return;
+                }
+            }
+
+            dispatch($nextJob);
+
+            return;
+        }
+
+        if ($manifest->onSuccessCallback !== null) {
+            ($manifest->onSuccessCallback->getClosure())($manifest->context);
+        }
+
+        if ($manifest->onCompleteCallback !== null) {
+            ($manifest->onCompleteCallback->getClosure())($manifest->context);
+        }
+    }
+
+    /**
+     * Dispatch the reversed compensation chain for a given manifest (static helper for batch finalization).
+     *
+     * Mirrors the instance-bound dispatchCompensationChain() but operates on
+     * an arbitrary manifest reference so the batch-finalization static
+     * helper can reuse the same reversal/dispatch logic. Silently
+     * short-circuits when no completed step has a compensation mapping.
+     *
+     * @param PipelineManifest $manifest The manifest whose completedSteps drive the reversed compensation chain.
+     * @return void
+     */
+    private static function dispatchCompensationChainFor(PipelineManifest $manifest): void
+    {
+        if ($manifest->compensationMapping === []) {
+            return;
+        }
+
+        $chain = [];
+        $reversedCompleted = array_reverse($manifest->completedSteps);
+
+        foreach ($reversedCompleted as $completedStep) {
+            if (! isset($manifest->compensationMapping[$completedStep])) {
+                continue;
+            }
+
+            $chain[] = new CompensationStepJob(
+                $manifest->compensationMapping[$completedStep],
+                $manifest,
+            );
+        }
+
+        if ($chain === []) {
+            return;
+        }
+
+        $manifest->failureException = null;
+
+        try {
+            Bus::chain($chain)->dispatch();
+        } catch (Throwable $dispatchException) {
+            Log::error('Pipeline compensation chain dispatch failed', [
+                'pipelineId' => $manifest->pipelineId,
+                'failedStepClass' => $manifest->failedStepClass,
+                'exception' => $dispatchException->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Resolve the per-sub-step config entry inside a parallel group.
+     *
+     * Reads $this->manifest->stepConfigs[$groupIndex]['configs'][$subIndex]
+     * and falls back to the default null-config shape when missing or
+     * malformed. Defensive against hand-built manifests that skip the
+     * PipelineBuilder's nested-shape generation.
+     *
+     * @param int $groupIndex The outer position of the parallel group.
+     * @param int $subIndex The zero-based declaration-order index of the sub-step.
+     *
+     * @return array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int} The resolved per-sub-step configuration.
+     */
+    private function resolveParallelSubConfig(int $groupIndex, int $subIndex): array
+    {
+        $default = ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
+        $groupEntry = $this->manifest->stepConfigs[$groupIndex] ?? null;
+
+        if (! is_array($groupEntry) || ($groupEntry['type'] ?? null) !== 'parallel') {
+            return $default;
+        }
+
+        /** @var array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> $configs */
+        $configs = $groupEntry['configs'];
+
+        return $configs[$subIndex] ?? $default;
     }
 
     /**

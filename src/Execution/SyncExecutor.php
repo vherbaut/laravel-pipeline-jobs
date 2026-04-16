@@ -112,6 +112,12 @@ final class SyncExecutor implements PipelineExecutor
     public function execute(PipelineDefinition $definition, PipelineManifest $manifest): ?PipelineContext
     {
         foreach ($manifest->stepClasses as $stepIndex => $stepClass) {
+            if (is_array($stepClass)) {
+                $this->executeParallelGroup($manifest, $stepIndex, $stepClass['classes']);
+
+                continue;
+            }
+
             try {
                 if ($this->shouldSkipStep($manifest, $stepIndex)) {
                     $manifest->advanceStep();
@@ -374,7 +380,9 @@ final class SyncExecutor implements PipelineExecutor
     /**
      * Decide whether the step at the given index should be skipped based on its condition entry.
      *
-     * Returns false when no condition is registered for the index. Otherwise
+     * Returns false when no condition is registered for the index or when the
+     * entry is the nested parallel-group shape (parallel sub-step conditions
+     * are evaluated individually inside executeParallelGroup()). Otherwise
      * unwraps the SerializableClosure, evaluates it against the current
      * context, and applies the `negated` flag. A throwing closure propagates
      * so the surrounding catch block converts it to StepExecutionFailed.
@@ -392,8 +400,252 @@ final class SyncExecutor implements PipelineExecutor
             return false;
         }
 
+        if (($entry['type'] ?? null) === 'parallel') {
+            return false;
+        }
+
+        /** @var array{closure: SerializableClosure, negated: bool} $entry */
         $closure = $entry['closure']->getClosure();
         $result = (bool) $closure($manifest->context);
+        $shouldRun = $entry['negated'] ? ! $result : $result;
+
+        return ! $shouldRun;
+    }
+
+    /**
+     * Execute a parallel step group's sub-steps sequentially in the current process.
+     *
+     * Synchronous parallelism is semantic, not concurrent: each sub-step
+     * runs inline, receives the SAME live PipelineContext (context mutations
+     * by earlier sub-steps are visible to later ones within the group —
+     * users expecting isolation must run queued), and contributes to the
+     * flat $manifest->completedSteps list by its own class name so reverse-
+     * order compensation over a StopAndCompensate failure includes it. The
+     * group advances the outer position exactly ONCE after all sub-steps
+     * have been processed.
+     *
+     * Per-sub-step conditions (when()/unless()) are evaluated against the
+     * live context. Skipped sub-steps do NOT fire beforeEach/afterEach, do
+     * NOT record completion, and do NOT count as a success for the purposes
+     * of clearing SkipAndContinue failure fields (mirrors the single-step
+     * skip contract in shouldSkipStep()).
+     *
+     * Failure handling per FailStrategy (AC #9):
+     * - StopImmediately: first sub-step failure aborts remaining siblings in
+     *   this group. onStepFailed fires with the failing sub-step's
+     *   StepDefinition; terminal onFailure / onComplete callbacks fire in
+     *   the canonical order; StepExecutionFailed is thrown naming the
+     *   failing sub-step.
+     * - StopAndCompensate: identical to StopImmediately except the
+     *   compensation chain over $completedSteps runs before the callback
+     *   sequence (reversed over all completed steps including sub-steps
+     *   completed earlier in this group).
+     * - SkipAndContinue: the failed sub-step is logged, failure fields are
+     *   cleared, remaining siblings continue to run, and any subsequent
+     *   sub-step success resets the last-failure fields (the group's
+     *   outer position still advances exactly once at the end). Matches
+     *   the "best-effort parallel group" semantic of the AC.
+     *
+     * Per-sub-step queue/connection/timeout config is INERT in sync mode
+     * (parity with the single-step sync path). Per-sub-step retry/backoff
+     * runs via the shared invokeStepWithRetry() helper, identical to the
+     * single-step call site.
+     *
+     * @param PipelineManifest $manifest The mutable manifest carrying context, completedSteps, and per-step conditions/configs.
+     * @param int $groupIndex The outer position of the parallel group in the pipeline.
+     * @param array<int, string> $subStepClasses Sub-step class-strings in declaration order.
+     * @return void
+     *
+     * @throws StepExecutionFailed When a sub-step fails under StopImmediately or StopAndCompensate (or when a hook or callback re-throws).
+     */
+    private function executeParallelGroup(PipelineManifest $manifest, int $groupIndex, array $subStepClasses): void
+    {
+        $groupConditions = $manifest->stepConditions[$groupIndex] ?? null;
+        $groupConfigs = $manifest->stepConfigs[$groupIndex] ?? null;
+
+        /** @var array<int, array{closure: SerializableClosure, negated: bool}|null> $subConditions */
+        $subConditions = (is_array($groupConditions) && ($groupConditions['type'] ?? null) === 'parallel')
+            ? $groupConditions['entries']
+            : [];
+
+        /** @var array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> $subConfigs */
+        $subConfigs = (is_array($groupConfigs) && ($groupConfigs['type'] ?? null) === 'parallel')
+            ? $groupConfigs['configs']
+            : [];
+
+        $defaultConfig = ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
+
+        foreach ($subStepClasses as $subIndex => $subStepClass) {
+            // Evaluate the sub-step condition OUTSIDE the outer try so a
+            // throwing condition closure is not misattributed to the
+            // sub-step's handle() via the sub-step catch block (the sub-step
+            // never ran). Condition-throws still surface as
+            // StepExecutionFailed::forStep with the sub-step class as the
+            // location so operators get a clear trail.
+            try {
+                $shouldSkip = $this->shouldSkipParallelSubStep($subConditions[$subIndex] ?? null, $manifest->context);
+            } catch (Throwable $conditionException) {
+                throw StepExecutionFailed::forStep(
+                    $manifest->pipelineId,
+                    $groupIndex,
+                    $subStepClass,
+                    $conditionException,
+                );
+            }
+
+            if ($shouldSkip) {
+                continue;
+            }
+
+            try {
+                $job = app()->make($subStepClass);
+
+                if (property_exists($job, 'pipelineManifest')) {
+                    $property = new ReflectionProperty($job, 'pipelineManifest');
+                    $property->setValue($job, $manifest);
+                }
+
+                $this->fireHooks(
+                    $manifest->beforeEachHooks,
+                    StepDefinition::fromJobClass($subStepClass),
+                    $manifest->context,
+                );
+
+                $this->invokeStepWithRetry($job, $subConfigs[$subIndex] ?? $defaultConfig);
+
+                $this->fireHooks(
+                    $manifest->afterEachHooks,
+                    StepDefinition::fromJobClass($subStepClass),
+                    $manifest->context,
+                );
+
+                $manifest->markStepCompleted($subStepClass);
+
+                // Under SkipAndContinue, a sub-step success clears any failure
+                // recorded by an earlier sub-step in the same group (AC #9).
+                $manifest->failureException = null;
+                $manifest->failedStepClass = null;
+                $manifest->failedStepIndex = null;
+            } catch (Throwable $subException) {
+                $manifest->failureException = $subException;
+                $manifest->failedStepClass = $subStepClass;
+                $manifest->failedStepIndex = $groupIndex;
+
+                try {
+                    $this->fireHooks(
+                        $manifest->onStepFailedHooks,
+                        StepDefinition::fromJobClass($subStepClass),
+                        $manifest->context,
+                        $subException,
+                    );
+                } catch (Throwable $hookException) {
+                    throw StepExecutionFailed::forStep(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $subStepClass,
+                        $hookException,
+                    );
+                }
+
+                if ($manifest->failStrategy === FailStrategy::SkipAndContinue) {
+                    Log::warning('Pipeline parallel sub-step skipped under SkipAndContinue', [
+                        'pipelineId' => $manifest->pipelineId,
+                        'groupIndex' => $groupIndex,
+                        'subStepClass' => $subStepClass,
+                        'subStepIndex' => $subIndex,
+                        'exception' => $subException->getMessage(),
+                    ]);
+
+                    $manifest->failureException = null;
+
+                    continue;
+                }
+
+                if ($manifest->failStrategy === FailStrategy::StopAndCompensate) {
+                    // Wrap the compensation chain so a throwing compensation
+                    // does NOT skip over the onFailure / onComplete sequence
+                    // below. The original sub-step exception stays the
+                    // canonical cause; the compensation failure is logged
+                    // for operator diagnostics.
+                    try {
+                        $this->runCompensationChain($manifest);
+                    } catch (Throwable $compensationException) {
+                        Log::error('Pipeline compensation chain failed during parallel group rollback', [
+                            'pipelineId' => $manifest->pipelineId,
+                            'groupIndex' => $groupIndex,
+                            'subStepClass' => $subStepClass,
+                            'compensationException' => $compensationException->getMessage(),
+                            'originalException' => $subException->getMessage(),
+                        ]);
+                    }
+                }
+
+                try {
+                    $this->firePipelineCallback(
+                        $manifest->onFailureCallback,
+                        $manifest->context,
+                        $subException,
+                    );
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $subStepClass,
+                        $callbackException,
+                        $subException,
+                    );
+                }
+
+                try {
+                    $this->firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $subStepClass,
+                        $callbackException,
+                        $subException,
+                    );
+                }
+
+                throw StepExecutionFailed::forStep(
+                    $manifest->pipelineId,
+                    $manifest->currentStepIndex,
+                    $subStepClass,
+                    $subException,
+                );
+            }
+        }
+
+        $manifest->advanceStep();
+    }
+
+    /**
+     * Decide whether a parallel sub-step should be skipped given its condition entry.
+     *
+     * Mirrors shouldSkipStep() but operates on the inner entry shape
+     * carried inside a parallel group (a flat entry or null), rather than
+     * reading from $manifest->stepConditions. The null placeholder in the
+     * entries array signals "no condition" (always run), matching the
+     * alignment invariant from buildStepConditions().
+     *
+     * @param array{closure: SerializableClosure, negated: bool}|null $entry The sub-step's condition entry or null when none registered.
+     * @param PipelineContext|null $context The live pipeline context at evaluation time.
+     *
+     * @return bool True when the sub-step must be skipped, false when it should run.
+     */
+    private function shouldSkipParallelSubStep(?array $entry, ?PipelineContext $context): bool
+    {
+        if ($entry === null) {
+            return false;
+        }
+
+        // Closure resolution + invocation may throw (SerializableClosure
+        // signature errors after app.key rotation, user closure raising).
+        // Let the throw propagate so the caller attributes it cleanly as a
+        // condition failure rather than a sub-step failure.
+        $closure = $entry['closure']->getClosure();
+        $result = (bool) $closure($context);
         $shouldRun = $entry['negated'] ? ! $result : $result;
 
         return ! $shouldRun;
