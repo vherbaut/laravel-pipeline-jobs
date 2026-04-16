@@ -69,6 +69,17 @@ composer require vherbaut/laravel-pipeline-jobs
 
 Le package auto découvre son service provider et sa facade. Aucun enregistrement manuel n'est nécessaire.
 
+### Optionnel : activer les groupes d'étapes parallèles
+
+Les groupes d'étapes parallèles (`JobPipeline::parallel([...])`) distribuent chaque sous étape via `Bus::batch()` de Laravel, qui nécessite la table `job_batches`. Si vous prévoyez d'utiliser des groupes parallèles sur des pipelines en file d'attente, exécutez une fois la commande native de Laravel pour publier et appliquer la migration :
+
+```bash
+php artisan queue:batches-table
+php artisan migrate
+```
+
+Vous pouvez ignorer cette étape si vous n'utilisez jamais de groupes parallèles, ou si vous ne les exécutez qu'en mode synchrone (les pipelines synchrones ne touchent pas à `Bus::batch()`).
+
 ## Démarrage rapide
 
 **1. Définir un contexte typé** qui transporte les données à travers votre pipeline :

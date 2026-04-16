@@ -69,6 +69,17 @@ composer require vherbaut/laravel-pipeline-jobs
 
 The package auto discovers its service provider and facade. No manual registration is needed.
 
+### Optional: enable parallel step groups
+
+Parallel step groups (`JobPipeline::parallel([...])`) fan out each sub step through Laravel's `Bus::batch()`, which requires the `job_batches` table. If you plan to use parallel groups on queued pipelines, run Laravel's built in command once to publish and apply the migration:
+
+```bash
+php artisan queue:batches-table
+php artisan migrate
+```
+
+You can skip this step if you never dispatch parallel groups, or if you only run them synchronously (sync pipelines do not touch `Bus::batch()`).
+
 ## Quick Start
 
 **1. Define a typed context** that carries data through your pipeline:

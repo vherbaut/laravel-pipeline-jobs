@@ -57,6 +57,12 @@ final class QueuedExecutor implements PipelineExecutor
      * Dispatch the first PipelineStepJob wrapper, applying per-step config.
      *
      * Branching driven by `stepConfigs[0]`:
+     * - Parallel-group shape (`['type' => 'parallel', 'configs' => [...]]`) →
+     *   dispatches a plain wrapper on the default queue with no per-wrapper
+     *   overrides. The wrapper's sole responsibility is to detect the parallel
+     *   shape in `handle()` and fan out via `dispatchParallelBatch()`; per-sub-step
+     *   queue / connection / timeout are applied on each `ParallelStepJob` inside
+     *   the batch, NOT on this outer wrapper (mirrors `PipelineStepJob::dispatchNextStep()`).
      * - `sync === true` → `dispatch_sync()`: runs the wrapper synchronously
      *   in the current PHP process. Exceptions propagate synchronously into
      *   the caller's stack frame. When a `timeout` is declared, it is still
@@ -82,9 +88,19 @@ final class QueuedExecutor implements PipelineExecutor
      */
     private function dispatchFirstStep(PipelineManifest $manifest): void
     {
-        $config = $manifest->stepConfigs[0] ?? ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
+        $config = $manifest->stepConfigs[0] ?? null;
 
-        if ((bool) $config['sync']) {
+        if (is_array($config) && ($config['type'] ?? null) === 'parallel') {
+            dispatch(new PipelineStepJob($manifest));
+
+            return;
+        }
+
+        $config = is_array($config)
+            ? $config
+            : ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
+
+        if ((bool) ($config['sync'] ?? false)) {
             $job = new PipelineStepJob($manifest);
 
             if (($config['timeout'] ?? null) !== null) {
@@ -98,11 +114,11 @@ final class QueuedExecutor implements PipelineExecutor
 
         $job = new PipelineStepJob($manifest);
 
-        if ($config['queue'] !== null) {
+        if (($config['queue'] ?? null) !== null) {
             $job->onQueue($config['queue']);
         }
 
-        if ($config['connection'] !== null) {
+        if (($config['connection'] ?? null) !== null) {
             $job->onConnection($config['connection']);
         }
 
