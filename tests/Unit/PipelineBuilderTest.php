@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Step;
@@ -336,7 +337,7 @@ it('accepts a mixed array of strings and StepDefinition instances in the constru
 
 it('rejects non-string non-StepDefinition items in the constructor array', function () {
     expect(fn () => new PipelineBuilder([FakeJobA::class, 42, FakeJobC::class]))
-        ->toThrow(InvalidPipelineDefinition::class, 'must be class-string or StepDefinition');
+        ->toThrow(InvalidPipelineDefinition::class, 'must be class-string, StepDefinition, or ParallelStepGroup');
 });
 
 // --- return() ---
@@ -948,4 +949,124 @@ it('threads Step::make()->retry()->timeout() through the array API into the reso
         ->and($definition->steps[0]->backoff)->toBe(5)
         ->and($definition->steps[0]->timeout)->toBe(60)
         ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class);
+});
+
+// --- ParallelStepGroup support (Story 8.1) ---
+
+it('accepts a ParallelStepGroup in the constructor array', function () {
+    $group = ParallelStepGroup::fromArray([FakeJobA::class, FakeJobB::class]);
+
+    $builder = new PipelineBuilder([FakeJobC::class, $group]);
+    $definition = $builder->build();
+
+    expect($definition->steps)->toHaveCount(2)
+        ->and($definition->steps[0])->toBeInstanceOf(StepDefinition::class)
+        ->and($definition->steps[1])->toBe($group);
+});
+
+it('parallel() fluent method appends a ParallelStepGroup to the pipeline', function () {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->parallel([FakeJobB::class, FakeJobC::class]);
+
+    $definition = $builder->build();
+
+    expect($definition->steps)->toHaveCount(2)
+        ->and($definition->steps[1])->toBeInstanceOf(ParallelStepGroup::class)
+        ->and($definition->steps[1]->steps[0]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[1]->steps[1]->jobClass)->toBe(FakeJobC::class);
+});
+
+it('addParallelGroup() appends a pre-built group', function () {
+    $group = ParallelStepGroup::fromArray([FakeJobA::class]);
+
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobB::class)
+        ->addParallelGroup($group);
+
+    $definition = $builder->build();
+
+    expect($definition->steps[1])->toBe($group);
+});
+
+it('rejects compensateWith() when the last step is a ParallelStepGroup', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->parallel([FakeJobB::class]);
+
+    expect(fn () => $builder->compensateWith('App\\Jobs\\CompensateFake'))
+        ->toThrow(InvalidPipelineDefinition::class, 'compensateWith() on a parallel step group');
+});
+
+it('rejects onQueue() when the last step is a ParallelStepGroup', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->parallel([FakeJobB::class]);
+
+    expect(fn () => $builder->onQueue('fast'))
+        ->toThrow(InvalidPipelineDefinition::class, 'onQueue() on a parallel step group');
+});
+
+it('rejects onConnection() when the last step is a ParallelStepGroup', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->parallel([FakeJobB::class]);
+
+    expect(fn () => $builder->onConnection('redis'))
+        ->toThrow(InvalidPipelineDefinition::class, 'onConnection() on a parallel step group');
+});
+
+it('rejects sync() when the last step is a ParallelStepGroup', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->parallel([FakeJobB::class]);
+
+    expect(fn () => $builder->sync())
+        ->toThrow(InvalidPipelineDefinition::class, 'sync() on a parallel step group');
+});
+
+it('rejects retry() when the last step is a ParallelStepGroup', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->parallel([FakeJobB::class]);
+
+    expect(fn () => $builder->retry(3))
+        ->toThrow(InvalidPipelineDefinition::class, 'retry() on a parallel step group');
+});
+
+it('rejects backoff() when the last step is a ParallelStepGroup', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->parallel([FakeJobB::class]);
+
+    expect(fn () => $builder->backoff(5))
+        ->toThrow(InvalidPipelineDefinition::class, 'backoff() on a parallel step group');
+});
+
+it('rejects timeout() when the last step is a ParallelStepGroup', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->parallel([FakeJobB::class]);
+
+    expect(fn () => $builder->timeout(60))
+        ->toThrow(InvalidPipelineDefinition::class, 'timeout() on a parallel step group');
+});
+
+it('resolveStepConfigs produces the nested parallel shape for a group with per-sub-step overrides', function () {
+    $definition = (new PipelineBuilder([
+        FakeJobA::class,
+        ParallelStepGroup::fromArray([
+            Step::make(FakeJobB::class)->onQueue('fast'),
+            Step::make(FakeJobC::class)->retry(3),
+        ]),
+    ]))->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0])->toBeArray()
+        ->and(isset($configs[0]['type']))->toBeFalse()
+        ->and($configs[1]['type'])->toBe('parallel')
+        ->and($configs[1]['configs'])->toHaveCount(2)
+        ->and($configs[1]['configs'][0]['queue'])->toBe('fast')
+        ->and($configs[1]['configs'][1]['retry'])->toBe(3);
 });

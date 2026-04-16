@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
@@ -146,4 +147,61 @@ it('stores pipeline-wide defaultRetry/defaultBackoff/defaultTimeout passed at co
     expect($definition->defaultRetry)->toBe(2)
         ->and($definition->defaultBackoff)->toBe(5)
         ->and($definition->defaultTimeout)->toBe(60);
+});
+
+// --- ParallelStepGroup support (Story 8.1) ---
+
+it('stepCount counts a parallel group as one outer position', function (): void {
+    $group = ParallelStepGroup::fromArray([
+        'App\\Jobs\\SubA',
+        'App\\Jobs\\SubB',
+        'App\\Jobs\\SubC',
+    ]);
+
+    $definition = new PipelineDefinition(steps: [
+        StepDefinition::fromJobClass('App\\Jobs\\StepA'),
+        $group,
+        StepDefinition::fromJobClass('App\\Jobs\\StepD'),
+    ]);
+
+    expect($definition->stepCount())->toBe(3);
+});
+
+it('flatStepCount expands a parallel group to its sub-step count', function (): void {
+    $group = ParallelStepGroup::fromArray([
+        'App\\Jobs\\SubA',
+        'App\\Jobs\\SubB',
+        'App\\Jobs\\SubC',
+    ]);
+
+    $definition = new PipelineDefinition(steps: [
+        StepDefinition::fromJobClass('App\\Jobs\\StepA'),
+        $group,
+        StepDefinition::fromJobClass('App\\Jobs\\StepD'),
+    ]);
+
+    expect($definition->flatStepCount())->toBe(5);
+});
+
+it('compensationMapping includes sub-step compensations from a parallel group', function (): void {
+    $stepWithCompensation = StepDefinition::fromJobClass('App\\Jobs\\SubA')
+        ->withCompensation('App\\Jobs\\CompensateSubA');
+
+    $group = ParallelStepGroup::fromArray([
+        $stepWithCompensation,
+        'App\\Jobs\\SubB',
+    ]);
+
+    $definition = new PipelineDefinition(steps: [
+        StepDefinition::fromJobClass('App\\Jobs\\StepA')->withCompensation('App\\Jobs\\CompensateA'),
+        $group,
+    ]);
+
+    $mapping = $definition->compensationMapping();
+
+    expect($mapping)->toHaveKey('App\\Jobs\\StepA')
+        ->and($mapping['App\\Jobs\\StepA'])->toBe('App\\Jobs\\CompensateA')
+        ->and($mapping)->toHaveKey('App\\Jobs\\SubA')
+        ->and($mapping['App\\Jobs\\SubA'])->toBe('App\\Jobs\\CompensateSubA')
+        ->and($mapping)->not->toHaveKey('App\\Jobs\\SubB');
 });

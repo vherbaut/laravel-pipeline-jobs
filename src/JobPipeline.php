@@ -51,6 +51,31 @@ final class JobPipeline
     }
 
     /**
+     * Build a parallel step group for inline use inside a pipeline definition.
+     *
+     * Usage: `Pipeline::make([A::class, JobPipeline::parallel([B::class, C::class]), D::class])`.
+     * The returned ParallelStepGroup slots into the pipeline's $steps array
+     * as a single logical position; at execution time, sub-steps fan out to
+     * concurrent workers via Bus::batch() under queued mode or run
+     * sequentially in declaration order under sync mode.
+     *
+     * This is a VALUE CONSTRUCTOR, not an execution verb: the resulting
+     * group is consumed by PipelineBuilder / JobPipeline::make() and does
+     * not itself trigger dispatch. For fluent-builder usage prefer
+     * PipelineBuilder::parallel() (same arguments, identical semantics).
+     *
+     * @param array<int, class-string|StepDefinition> $jobs Sub-step class-strings or pre-built StepDefinition instances (at least one).
+     *
+     * @return ParallelStepGroup A value object grouping the sub-steps for parallel execution.
+     *
+     * @throws InvalidPipelineDefinition When $jobs is empty or contains an unsupported item type.
+     */
+    public static function parallel(array $jobs): ParallelStepGroup
+    {
+        return ParallelStepGroup::fromArray($jobs);
+    }
+
+    /**
      * Register a pipeline as a Laravel event listener in a single call.
      *
      * Equivalent to: make($jobs)->send($send)->toListener() + Event::listen($eventClass, $listener).

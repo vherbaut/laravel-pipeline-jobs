@@ -85,6 +85,12 @@ final class RecordingExecutor implements PipelineExecutor
     public function execute(PipelineDefinition $definition, PipelineManifest $manifest): ?PipelineContext
     {
         foreach ($manifest->stepClasses as $stepIndex => $stepClass) {
+            if (is_array($stepClass)) {
+                $this->executeParallelGroup($manifest, $stepIndex, $stepClass['classes']);
+
+                continue;
+            }
+
             try {
                 if ($this->shouldSkipStep($manifest, $stepIndex)) {
                     $manifest->advanceStep();
@@ -238,11 +244,160 @@ final class RecordingExecutor implements PipelineExecutor
             return false;
         }
 
+        if (($entry['type'] ?? null) === 'parallel') {
+            return false;
+        }
+
+        /** @var array{closure: SerializableClosure, negated: bool} $entry */
         $closure = $entry['closure']->getClosure();
         $result = (bool) $closure($manifest->context);
         $shouldRun = $entry['negated'] ? ! $result : $result;
 
         return ! $shouldRun;
+    }
+
+    /**
+     * Replay a parallel group's sub-steps sequentially in recording mode.
+     *
+     * Mirrors SyncExecutor::executeParallelGroup() exactly so Pipeline::fake()->recording()
+     * observes the same sequential-sync semantics (AC #14). Each sub-step's
+     * completion is recorded in $this->executedSteps and a context snapshot
+     * is captured after its successful run. Failure handling matches the
+     * single-step failure path (onStepFailed, FailStrategy branching) with
+     * the failing sub-step's class surfaced on the manifest.
+     *
+     * @param PipelineManifest $manifest The manifest driving execution state.
+     * @param int $groupIndex The outer position of the parallel group.
+     * @param array<int, string> $subStepClasses Sub-step class-strings in declaration order.
+     * @return void
+     *
+     * @throws StepExecutionFailed When a sub-step fails under StopImmediately / StopAndCompensate.
+     */
+    private function executeParallelGroup(PipelineManifest $manifest, int $groupIndex, array $subStepClasses): void
+    {
+        $groupConditions = $manifest->stepConditions[$groupIndex] ?? null;
+
+        /** @var array<int, array{closure: SerializableClosure, negated: bool}|null> $subConditions */
+        $subConditions = (is_array($groupConditions) && ($groupConditions['type'] ?? null) === 'parallel')
+            ? $groupConditions['entries']
+            : [];
+
+        foreach ($subStepClasses as $subIndex => $subStepClass) {
+            try {
+                $entry = $subConditions[$subIndex] ?? null;
+
+                if ($entry !== null) {
+                    $closure = $entry['closure']->getClosure();
+                    $result = (bool) $closure($manifest->context);
+                    $shouldRun = $entry['negated'] ? ! $result : $result;
+
+                    if (! $shouldRun) {
+                        continue;
+                    }
+                }
+
+                $job = app()->make($subStepClass);
+
+                if (property_exists($job, 'pipelineManifest')) {
+                    $property = new ReflectionProperty($job, 'pipelineManifest');
+                    $property->setValue($job, $manifest);
+                }
+
+                $this->fireHooks(
+                    $manifest->beforeEachHooks,
+                    StepDefinition::fromJobClass($subStepClass),
+                    $manifest->context,
+                );
+
+                app()->call([$job, 'handle']);
+
+                $this->fireHooks(
+                    $manifest->afterEachHooks,
+                    StepDefinition::fromJobClass($subStepClass),
+                    $manifest->context,
+                );
+
+                $manifest->markStepCompleted($subStepClass);
+                $this->executedSteps[] = $subStepClass;
+
+                if ($manifest->context !== null) {
+                    $this->contextSnapshots[] = unserialize(serialize($manifest->context));
+                }
+            } catch (Throwable $subException) {
+                $manifest->failureException = $subException;
+                $manifest->failedStepClass = $subStepClass;
+                $manifest->failedStepIndex = $groupIndex;
+
+                try {
+                    $this->fireHooks(
+                        $manifest->onStepFailedHooks,
+                        StepDefinition::fromJobClass($subStepClass),
+                        $manifest->context,
+                        $subException,
+                    );
+                } catch (Throwable $hookException) {
+                    throw StepExecutionFailed::forStep(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $subStepClass,
+                        $hookException,
+                    );
+                }
+
+                if ($manifest->failStrategy === FailStrategy::SkipAndContinue) {
+                    Log::warning('Pipeline parallel sub-step skipped under SkipAndContinue', [
+                        'pipelineId' => $manifest->pipelineId,
+                        'groupIndex' => $groupIndex,
+                        'subStepClass' => $subStepClass,
+                        'subStepIndex' => $subIndex,
+                        'exception' => $subException->getMessage(),
+                    ]);
+
+                    $manifest->failureException = null;
+
+                    continue;
+                }
+
+                $this->runCompensation($manifest);
+
+                try {
+                    $this->firePipelineCallback(
+                        $manifest->onFailureCallback,
+                        $manifest->context,
+                        $subException,
+                    );
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $subStepClass,
+                        $callbackException,
+                        $subException,
+                    );
+                }
+
+                try {
+                    $this->firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $manifest->currentStepIndex,
+                        $subStepClass,
+                        $callbackException,
+                        $subException,
+                    );
+                }
+
+                throw StepExecutionFailed::forStep(
+                    $manifest->pipelineId,
+                    $manifest->currentStepIndex,
+                    $subStepClass,
+                    $subException,
+                );
+            }
+        }
+
+        $manifest->advanceStep();
     }
 
     /**

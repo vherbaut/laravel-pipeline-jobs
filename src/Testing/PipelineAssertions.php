@@ -7,6 +7,7 @@ namespace Vherbaut\LaravelPipelineJobs\Testing;
 use Closure;
 use PHPUnit\Framework\Assert as PHPUnit;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
@@ -158,6 +159,70 @@ trait PipelineAssertions
                 $actual,
             ),
         );
+    }
+
+    /**
+     * Assert that a recorded pipeline contains a parallel group matching the expected sub-step class list.
+     *
+     * Walks the resolved pipeline's `$definition->steps`, locates any
+     * ParallelStepGroup whose sub-steps' jobClass values match the expected
+     * list in declaration order, and fails with a listing of the recorded
+     * groups (by index) when no match is found. When no parallel group has
+     * been recorded at all, fails with a clear "no parallel group recorded"
+     * message.
+     *
+     * Available in default Pipeline::fake() mode and in recording mode
+     * (does NOT require recording mode — the assertion inspects the
+     * recorded definition, not execution traces).
+     *
+     * @param array<int, string> $expectedStepClasses Sub-step class-strings in expected declaration order.
+     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
+     * @return void
+     */
+    public function assertParallelGroupExecuted(array $expectedStepClasses, ?int $pipelineIndex = null): void
+    {
+        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
+
+        $actualGroups = [];
+
+        foreach ($recorded->definition->steps as $step) {
+            if (! $step instanceof ParallelStepGroup) {
+                continue;
+            }
+
+            $subClasses = array_map(
+                static fn (StepDefinition $subStep): string => $subStep->jobClass,
+                $step->steps,
+            );
+
+            $actualGroups[] = $subClasses;
+
+            if ($subClasses === $expectedStepClasses) {
+                return;
+            }
+        }
+
+        if ($actualGroups === []) {
+            PHPUnit::fail(sprintf(
+                'Expected a recorded parallel group with sub-steps [%s], but the resolved pipeline recorded no parallel groups.',
+                implode(', ', array_map(static fn (string $class): string => class_basename($class), $expectedStepClasses)),
+            ));
+        }
+
+        PHPUnit::fail(sprintf(
+            "Expected a recorded parallel group with sub-steps [%s], but none of the %d recorded group(s) matched.\n\nRecorded parallel groups:\n%s",
+            implode(', ', array_map(static fn (string $class): string => class_basename($class), $expectedStepClasses)),
+            count($actualGroups),
+            implode("\n", array_map(
+                static fn (array $subs, int $index): string => sprintf(
+                    '  %d. [%s]',
+                    $index + 1,
+                    implode(', ', array_map(static fn (string $class): string => class_basename($class), $subs)),
+                ),
+                $actualGroups,
+                array_keys($actualGroups),
+            )),
+        ));
     }
 
     /**

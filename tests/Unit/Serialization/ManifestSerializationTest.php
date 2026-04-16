@@ -310,6 +310,94 @@ it('preserves pre-Story-7.2 three-key stepConfigs shape through deserialization 
         ->and($restored->stepConfigs[0]['timeout'] ?? null)->toBeNull();
 });
 
+it('serializes a manifest containing a parallel-group shape', function () {
+    $stepClasses = [
+        'App\\Jobs\\StepA',
+        ['type' => 'parallel', 'classes' => ['App\\Jobs\\StepB', 'App\\Jobs\\StepC']],
+        'App\\Jobs\\StepD',
+    ];
+
+    $manifest = PipelineManifest::create(stepClasses: $stepClasses);
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->stepClasses)->toBe($stepClasses);
+});
+
+it('serializes a manifest containing parallel stepConditions and stepConfigs shapes', function () {
+    $stepConditions = [
+        1 => [
+            'type' => 'parallel',
+            'entries' => [
+                0 => ['closure' => new SerializableClosure(fn () => true), 'negated' => false],
+                1 => null,
+            ],
+        ],
+    ];
+    $stepConfigs = [
+        0 => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+        1 => [
+            'type' => 'parallel',
+            'configs' => [
+                0 => ['queue' => 'fast', 'connection' => 'redis', 'sync' => false, 'retry' => 2, 'backoff' => 5, 'timeout' => 30],
+                1 => ['queue' => null, 'connection' => null, 'sync' => true, 'retry' => null, 'backoff' => null, 'timeout' => null],
+            ],
+        ],
+    ];
+    $stepClasses = [
+        'App\\Jobs\\Outer',
+        ['type' => 'parallel', 'classes' => ['App\\Jobs\\Sub1', 'App\\Jobs\\Sub2']],
+    ];
+
+    $manifest = PipelineManifest::create(
+        stepClasses: $stepClasses,
+        stepConditions: $stepConditions,
+        stepConfigs: $stepConfigs,
+    );
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->stepClasses)->toBe($stepClasses)
+        ->and($restored->stepConfigs)->toBe($stepConfigs)
+        ->and($restored->stepConditions[1]['type'])->toBe('parallel')
+        ->and($restored->stepConditions[1]['entries'][1])->toBeNull()
+        ->and($restored->stepConditions[1]['entries'][0]['negated'])->toBeFalse()
+        ->and(($restored->stepConditions[1]['entries'][0]['closure']->getClosure())())->toBeTrue();
+});
+
+it('deserializes a legacy all-string stepClasses payload unchanged', function () {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
+
+    // Legacy payload predates Story 8.1: $stepClasses is a flat list of class-strings.
+    $legacyPayload = [
+        'pipelineId' => $manifest->pipelineId,
+        'pipelineName' => null,
+        'stepClasses' => ['App\\Jobs\\A', 'App\\Jobs\\B', 'App\\Jobs\\C'],
+        'compensationMapping' => [],
+        'stepConditions' => [],
+        'currentStepIndex' => 0,
+        'completedSteps' => [],
+        'context' => null,
+        'failStrategy' => $manifest->failStrategy,
+        'failedStepClass' => null,
+        'failedStepIndex' => null,
+        'beforeEachHooks' => [],
+        'afterEachHooks' => [],
+        'onStepFailedHooks' => [],
+        'onSuccessCallback' => null,
+        'onFailureCallback' => null,
+        'onCompleteCallback' => null,
+        'stepConfigs' => [],
+    ];
+
+    $restored = (new ReflectionClass(PipelineManifest::class))->newInstanceWithoutConstructor();
+    $restored->__unserialize($legacyPayload);
+
+    expect($restored->stepClasses)->toBe(['App\\Jobs\\A', 'App\\Jobs\\B', 'App\\Jobs\\C']);
+});
+
 it('defaults stepConfigs to an empty array when deserializing a legacy payload', function () {
     $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\Step']);
 

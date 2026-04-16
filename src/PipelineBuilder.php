@@ -21,7 +21,7 @@ use Vherbaut\LaravelPipelineJobs\Execution\SyncExecutor;
  */
 final class PipelineBuilder
 {
-    /** @var array<int, StepDefinition> */
+    /** @var array<int, StepDefinition|ParallelStepGroup> */
     private array $steps = [];
 
     private PipelineContext|Closure|null $context = null;
@@ -68,10 +68,13 @@ final class PipelineBuilder
     /**
      * Create a new pipeline builder.
      *
-     * Accepts a mixed list of job class names and pre-built StepDefinition
-     * instances. Strings are converted via StepDefinition::fromJobClass();
-     * StepDefinition instances (produced by Step::when(), Step::unless(),
-     * or Step::make()) are appended as-is. Any other type triggers
+     * Accepts a mixed list of job class names, pre-built StepDefinition
+     * instances, and ParallelStepGroup instances. Strings are converted via
+     * StepDefinition::fromJobClass(); StepDefinition instances (produced by
+     * Step::when(), Step::unless(), or Step::make()) are appended as-is;
+     * ParallelStepGroup instances (produced by JobPipeline::parallel() or
+     * PipelineBuilder::parallel()) are appended as a single outer position
+     * whose sub-steps fan out at execution time. Any other type triggers
      * InvalidPipelineDefinition at construction time so user code does not
      * silently build an invalid pipeline at runtime.
      *
@@ -79,10 +82,10 @@ final class PipelineBuilder
      * may pass untrusted data (e.g., from configuration) and the runtime
      * check exists precisely to catch that case.
      *
-     * @param array<int, mixed> $jobs Job class names or pre-built step definitions; each item must be a class-string or a StepDefinition.
+     * @param array<int, mixed> $jobs Job class names, pre-built StepDefinition instances, or ParallelStepGroup instances.
      * @return void
      *
-     * @throws InvalidPipelineDefinition When an array item is neither a class-string nor a StepDefinition.
+     * @throws InvalidPipelineDefinition When an array item is none of: class-string, StepDefinition, or ParallelStepGroup.
      */
     public function __construct(array $jobs = [])
     {
@@ -99,8 +102,14 @@ final class PipelineBuilder
                 continue;
             }
 
+            if ($job instanceof ParallelStepGroup) {
+                $this->steps[] = $job;
+
+                continue;
+            }
+
             throw new InvalidPipelineDefinition(
-                'Pipeline definition items must be class-string or StepDefinition instances, got '.get_debug_type($job).'.',
+                'Pipeline definition items must be class-string, StepDefinition, or ParallelStepGroup instances, got '.get_debug_type($job).'.',
             );
         }
     }
@@ -134,6 +143,51 @@ final class PipelineBuilder
         $this->steps[] = $step;
 
         return $this;
+    }
+
+    /**
+     * Append a pre-built ParallelStepGroup to the pipeline.
+     *
+     * Symmetric with addStep(): the group occupies one outer position in the
+     * pipeline's internal steps array. Sub-steps are NOT flattened; their
+     * fan-out happens at execution time (Bus::batch() when queued,
+     * sequential sync in SyncExecutor). Exposed publicly so advanced callers
+     * can hand-craft a group via ParallelStepGroup::fromArray() and pass it
+     * through addParallelGroup() without going through the fluent parallel()
+     * shortcut.
+     *
+     * @param ParallelStepGroup $group Pre-built parallel group containing at least one sub-step.
+     *
+     * @return static
+     */
+    public function addParallelGroup(ParallelStepGroup $group): static
+    {
+        $this->steps[] = $group;
+
+        return $this;
+    }
+
+    /**
+     * Append a parallel step group built from an array of class-strings or StepDefinition instances.
+     *
+     * Fluent shorthand for addParallelGroup(ParallelStepGroup::fromArray($jobs)).
+     *
+     * Conditions on parallel groups are not supported in Epic 8 Story 8.1.
+     * Apply Step::when() / Step::unless() to individual sub-steps before
+     * wrapping them into the group. Likewise, per-step mutators
+     * (compensateWith, onQueue, onConnection, sync, retry, backoff, timeout)
+     * chained immediately after parallel() throw InvalidPipelineDefinition;
+     * apply those mutators to individual sub-steps beforehand.
+     *
+     * @param array<int, class-string|StepDefinition> $jobs Sub-step class-strings or pre-built StepDefinition instances (at least one).
+     *
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $jobs is empty or contains an unsupported item type.
+     */
+    public function parallel(array $jobs): static
+    {
+        return $this->addParallelGroup(ParallelStepGroup::fromArray($jobs));
     }
 
     /**
@@ -181,13 +235,11 @@ final class PipelineBuilder
      */
     public function compensateWith(string $compensationClass): static
     {
-        if ($this->steps === []) {
-            throw new InvalidPipelineDefinition('Cannot call compensateWith() before adding a step.');
-        }
-
-        $lastStep = array_pop($this->steps);
+        $lastStep = $this->requireLastIsStep(__FUNCTION__);
 
         if ($lastStep->compensationJobClass !== null) {
+            $this->steps[] = $lastStep;
+
             throw new InvalidPipelineDefinition('Compensation is already defined for the last step.');
         }
 
@@ -214,13 +266,7 @@ final class PipelineBuilder
             throw new InvalidPipelineDefinition('Queue name passed to onQueue() cannot be empty.');
         }
 
-        if ($this->steps === []) {
-            throw new InvalidPipelineDefinition(
-                'Cannot call onQueue() on PipelineBuilder before adding a step. Chain onQueue() after step(), or call defaultQueue() for a pipeline-wide default.',
-            );
-        }
-
-        $last = array_pop($this->steps);
+        $last = $this->requireLastIsStep(__FUNCTION__);
         $this->steps[] = $last->onQueue($queue);
 
         return $this;
@@ -244,13 +290,7 @@ final class PipelineBuilder
             throw new InvalidPipelineDefinition('Connection name passed to onConnection() cannot be empty.');
         }
 
-        if ($this->steps === []) {
-            throw new InvalidPipelineDefinition(
-                'Cannot call onConnection() on PipelineBuilder before adding a step. Chain onConnection() after step(), or call defaultConnection() for a pipeline-wide default.',
-            );
-        }
-
-        $last = array_pop($this->steps);
+        $last = $this->requireLastIsStep(__FUNCTION__);
         $this->steps[] = $last->onConnection($connection);
 
         return $this;
@@ -275,13 +315,7 @@ final class PipelineBuilder
      */
     public function sync(): static
     {
-        if ($this->steps === []) {
-            throw new InvalidPipelineDefinition(
-                'Cannot call sync() on PipelineBuilder before adding a step. Chain sync() after step().',
-            );
-        }
-
-        $last = array_pop($this->steps);
+        $last = $this->requireLastIsStep(__FUNCTION__);
         $this->steps[] = $last->sync();
 
         return $this;
@@ -309,13 +343,7 @@ final class PipelineBuilder
             throw new InvalidPipelineDefinition('retry must be a non-negative integer, got '.$retry.'.');
         }
 
-        if ($this->steps === []) {
-            throw new InvalidPipelineDefinition(
-                'Cannot call retry() on PipelineBuilder before adding a step. Chain retry() after step(), or call defaultRetry() for a pipeline-wide default.',
-            );
-        }
-
-        $last = array_pop($this->steps);
+        $last = $this->requireLastIsStep(__FUNCTION__);
         $this->steps[] = $last->retry($retry);
 
         return $this;
@@ -341,13 +369,7 @@ final class PipelineBuilder
             throw new InvalidPipelineDefinition('backoff must be a non-negative integer, got '.$backoff.'.');
         }
 
-        if ($this->steps === []) {
-            throw new InvalidPipelineDefinition(
-                'Cannot call backoff() on PipelineBuilder before adding a step. Chain backoff() after step(), or call defaultBackoff() for a pipeline-wide default.',
-            );
-        }
-
-        $last = array_pop($this->steps);
+        $last = $this->requireLastIsStep(__FUNCTION__);
         $this->steps[] = $last->backoff($backoff);
 
         return $this;
@@ -375,13 +397,7 @@ final class PipelineBuilder
             throw new InvalidPipelineDefinition('timeout must be a positive integer (>= 1), got '.$timeout.'.');
         }
 
-        if ($this->steps === []) {
-            throw new InvalidPipelineDefinition(
-                'Cannot call timeout() on PipelineBuilder before adding a step. Chain timeout() after step(), or call defaultTimeout() for a pipeline-wide default.',
-            );
-        }
-
-        $last = array_pop($this->steps);
+        $last = $this->requireLastIsStep(__FUNCTION__);
         $this->steps[] = $last->timeout($timeout);
 
         return $this;
@@ -844,10 +860,7 @@ final class PipelineBuilder
             ? ($this->context)()
             : $this->context;
 
-        $stepClasses = array_map(
-            fn (StepDefinition $step): string => $step->jobClass,
-            $definition->steps,
-        );
+        $stepClasses = self::buildStepClassesPayload($definition);
 
         $stepConfigs = self::resolveStepConfigs($definition);
 
@@ -922,15 +935,12 @@ final class PipelineBuilder
         $hookClosures = $this->buildHookSerializableClosures($definition);
         $callbackClosures = $this->buildCallbackSerializableClosures($definition);
 
-        return function (object $event) use ($definition, $contextSource, $shouldBeQueued, $stepConditions, $stepConfigs, $hookClosures, $callbackClosures): void {
+        $stepClasses = self::buildStepClassesPayload($definition);
+
+        return function (object $event) use ($definition, $contextSource, $shouldBeQueued, $stepClasses, $stepConditions, $stepConfigs, $hookClosures, $callbackClosures): void {
             $resolvedContext = $contextSource instanceof Closure
                 ? ($contextSource)($event)
                 : $contextSource;
-
-            $stepClasses = array_map(
-                fn (StepDefinition $step): string => $step->jobClass,
-                $definition->steps,
-            );
 
             $manifest = PipelineManifest::create(
                 stepClasses: $stepClasses,
@@ -978,15 +988,54 @@ final class PipelineBuilder
      * buildHookSerializableClosures() which applies the same pattern to
      * the three pipeline-level hook arrays.
      *
+     * ParallelStepGroup entries produce a nested shape keyed by the outer
+     * position: `['type' => 'parallel', 'entries' => array<int, entry|null>]`
+     * where each inner entry mirrors the non-parallel shape (closure +
+     * negated) OR is null when the sub-step carries no condition. This
+     * preserves positional alignment with sub-steps so condition lookup
+     * at execution time is a direct index into `['entries'][$subIndex]`.
+     *
      * @param PipelineDefinition $definition The built pipeline definition.
      *
-     * @return array<int, array{closure: SerializableClosure, negated: bool}> Condition entries keyed by step index.
+     * @return array<int, array{closure: SerializableClosure, negated: bool}|array{type: string, entries: array<int, array{closure: SerializableClosure, negated: bool}|null>}> Condition entries keyed by outer step index; parallel entries carry a nested shape.
      */
     private function buildStepConditions(PipelineDefinition $definition): array
     {
         $conditions = [];
 
         foreach ($definition->steps as $index => $step) {
+            if ($step instanceof ParallelStepGroup) {
+                $entries = [];
+                $hasAny = false;
+
+                foreach ($step->steps as $subIndex => $subStep) {
+                    if ($subStep->condition === null) {
+                        $entries[$subIndex] = null;
+
+                        continue;
+                    }
+
+                    $entries[$subIndex] = [
+                        'closure' => new SerializableClosure($subStep->condition),
+                        'negated' => $subStep->conditionNegated,
+                    ];
+                    $hasAny = true;
+                }
+
+                if ($hasAny) {
+                    $conditions[$index] = [
+                        'type' => 'parallel',
+                        'entries' => $entries,
+                    ];
+                }
+                // Intentionally omit $conditions[$index] when $hasAny === false:
+                // consumers read via $stepConditions[$index] ?? null and treat
+                // absence as "unconditional group" (keeps the manifest payload
+                // lean when no sub-step carries a condition).
+
+                continue;
+            }
+
             if ($step->condition === null) {
                 continue;
             }
@@ -1073,25 +1122,144 @@ final class PipelineBuilder
      * the definition so external consumers of the definition can reproduce
      * the same resolution without access to the builder.
      *
+     * ParallelStepGroup entries produce a nested shape at their outer
+     * position: `['type' => 'parallel', 'configs' => array<int, inner>]`
+     * where each inner entry resolves the same step-override-over-default
+     * precedence for a sub-step. Non-parallel entries keep their flat
+     * config shape.
+     *
      * @param PipelineDefinition $definition The built pipeline definition carrying steps and pipeline-level defaults.
      *
-     * @return array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> Resolved per-step config indexed by step position.
+     * @return array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}|array{type: string, configs: array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}>}> Resolved per-step config indexed by step position; parallel entries carry a nested shape.
      */
     public static function resolveStepConfigs(PipelineDefinition $definition): array
     {
         $configs = [];
 
         foreach ($definition->steps as $index => $step) {
-            $configs[$index] = [
-                'queue' => $step->queue ?? $definition->defaultQueue,
-                'connection' => $step->connection ?? $definition->defaultConnection,
-                'sync' => $step->sync,
-                'retry' => $step->retry ?? $definition->defaultRetry,
-                'backoff' => $step->backoff ?? $definition->defaultBackoff,
-                'timeout' => $step->timeout ?? $definition->defaultTimeout,
-            ];
+            if ($step instanceof ParallelStepGroup) {
+                $subConfigs = [];
+
+                foreach ($step->steps as $subIndex => $subStep) {
+                    $subConfigs[$subIndex] = self::resolveStepConfig($subStep, $definition);
+                }
+
+                $configs[$index] = [
+                    'type' => 'parallel',
+                    'configs' => $subConfigs,
+                ];
+
+                continue;
+            }
+
+            $configs[$index] = self::resolveStepConfig($step, $definition);
         }
 
         return $configs;
+    }
+
+    /**
+     * Resolve the effective execution configuration for a single StepDefinition.
+     *
+     * Applies the `step override > pipeline default > null` precedence
+     * rule for queue, connection, retry, backoff, and timeout; sync is
+     * pass-through because there is no pipeline-level sync default.
+     * Extracted from resolveStepConfigs() so both the flat and nested
+     * (parallel-group) code paths share the same resolution.
+     *
+     * @param StepDefinition $step The sub-step to resolve configuration for.
+     * @param PipelineDefinition $definition The enclosing definition carrying pipeline-level defaults.
+     *
+     * @return array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int} The fully resolved per-step configuration.
+     */
+    private static function resolveStepConfig(StepDefinition $step, PipelineDefinition $definition): array
+    {
+        return [
+            'queue' => $step->queue ?? $definition->defaultQueue,
+            'connection' => $step->connection ?? $definition->defaultConnection,
+            'sync' => $step->sync,
+            'retry' => $step->retry ?? $definition->defaultRetry,
+            'backoff' => $step->backoff ?? $definition->defaultBackoff,
+            'timeout' => $step->timeout ?? $definition->defaultTimeout,
+        ];
+    }
+
+    /**
+     * Build the widened step-classes payload for the manifest.
+     *
+     * Shared helper between run() and toListener(). Non-parallel outer
+     * positions contribute a plain class-string; ParallelStepGroup
+     * positions contribute a nested `['type' => 'parallel', 'classes' => [...]]`
+     * shape whose `classes` array lists sub-step job classes in
+     * declaration order.
+     *
+     * @param PipelineDefinition $definition The built pipeline definition.
+     *
+     * @return array<int, string|array{type: string, classes: array<int, string>}> Outer-position-indexed step-classes payload.
+     */
+    private static function buildStepClassesPayload(PipelineDefinition $definition): array
+    {
+        $payload = [];
+
+        foreach ($definition->steps as $index => $step) {
+            if ($step instanceof ParallelStepGroup) {
+                $payload[$index] = [
+                    'type' => 'parallel',
+                    'classes' => array_map(
+                        static fn (StepDefinition $subStep): string => $subStep->jobClass,
+                        $step->steps,
+                    ),
+                ];
+
+                continue;
+            }
+
+            $payload[$index] = $step->jobClass;
+        }
+
+        return $payload;
+    }
+
+    /**
+     * Enforce that the last accumulated step entry is a mutable StepDefinition.
+     *
+     * Pops the last element of the internal $steps array and verifies two
+     * preconditions before returning it:
+     *  - the array is non-empty (the caller has at least one step),
+     *  - the popped entry is a StepDefinition (not a ParallelStepGroup).
+     *
+     * On either precondition failure the method throws
+     * InvalidPipelineDefinition with a targeted message naming the caller
+     * (via __FUNCTION__ passed in by the caller). On ParallelStepGroup
+     * rejection the popped group is restored so the builder's state is
+     * left intact for callers handling the exception. The caller is
+     * expected to re-append the returned StepDefinition (typically in a
+     * mutated form via StepDefinition::onQueue() / retry() / etc.).
+     *
+     * @param string $methodName The calling mutator's method name (e.g., 'onQueue'); surfaces in the thrown error message.
+     *
+     * @return StepDefinition The last StepDefinition popped off the accumulator.
+     *
+     * @throws InvalidPipelineDefinition When the accumulator is empty or the last entry is a ParallelStepGroup.
+     */
+    private function requireLastIsStep(string $methodName): StepDefinition
+    {
+        if ($this->steps === []) {
+            throw new InvalidPipelineDefinition(
+                "Cannot call {$methodName}() on PipelineBuilder before adding a step. Chain {$methodName}() after step() or addStep().",
+            );
+        }
+
+        $last = array_pop($this->steps);
+
+        if ($last instanceof ParallelStepGroup) {
+            $this->steps[] = $last;
+
+            throw new InvalidPipelineDefinition(
+                "Cannot call {$methodName}() on a parallel step group. Apply {$methodName}() to individual steps before wrapping them into JobPipeline::parallel([...]).",
+            );
+        }
+
+        return $last;
     }
 }

@@ -3,14 +3,18 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
+use PHPUnit\Framework\AssertionFailedError;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
+use Vherbaut\LaravelPipelineJobs\JobPipeline;
+use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderPlacedEvent;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingThenSucceedingJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobC;
@@ -394,8 +398,6 @@ it('per-step queue: FakePipelineBuilder delegates onQueue, onConnection, sync, d
         ->and($definition->defaultConnection)->toBe('redis');
 });
 
-use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingThenSucceedingJob;
-
 it('per-step retry: Pipeline::fake() captures retry/backoff/timeout on the recorded definition', function (): void {
     $fake = Pipeline::fake();
 
@@ -521,4 +523,72 @@ it('Pipeline::fake() assertion helpers work against dispatch()-originated pipeli
     Pipeline::assertPipelineRanTimes(1);
     Pipeline::assertStepExecuted(TrackExecutionJobA::class);
     Pipeline::assertContextHas('name', 'probe');
+});
+
+it('records a pipeline that contains a parallel group', function (): void {
+    $fake = Pipeline::fake();
+
+    Pipeline::make([
+        FakeJobA::class,
+        JobPipeline::parallel([FakeJobB::class, FakeJobC::class]),
+    ])->send(new SimpleContext)->run();
+
+    $recorded = $fake->recordedPipelines();
+
+    expect($recorded)->toHaveCount(1);
+
+    $steps = $recorded[0]->definition->steps;
+    expect($steps)->toHaveCount(2)
+        ->and($steps[0])->toBeInstanceOf(StepDefinition::class)
+        ->and($steps[1])->toBeInstanceOf(ParallelStepGroup::class)
+        ->and($steps[1]->steps[0]->jobClass)->toBe(FakeJobB::class)
+        ->and($steps[1]->steps[1]->jobClass)->toBe(FakeJobC::class);
+});
+
+it('assertParallelGroupExecuted passes when a matching group was recorded', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        FakeJobA::class,
+        JobPipeline::parallel([FakeJobB::class, FakeJobC::class]),
+    ])->send(new SimpleContext)->run();
+
+    Pipeline::assertParallelGroupExecuted([FakeJobB::class, FakeJobC::class]);
+});
+
+it('assertParallelGroupExecuted fails when no matching group exists', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        FakeJobA::class,
+        JobPipeline::parallel([FakeJobB::class]),
+    ])->send(new SimpleContext)->run();
+
+    expect(fn () => Pipeline::assertParallelGroupExecuted([FakeJobB::class, FakeJobC::class]))
+        ->toThrow(AssertionFailedError::class, 'none of the 1 recorded group(s) matched');
+});
+
+it('assertParallelGroupExecuted fails with a clear message when no parallel group was recorded at all', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class, FakeJobB::class])->send(new SimpleContext)->run();
+
+    expect(fn () => Pipeline::assertParallelGroupExecuted([FakeJobB::class]))
+        ->toThrow(AssertionFailedError::class, 'recorded no parallel groups');
+});
+
+it('Pipeline::fake()->recording() replays a parallel group sequentially through RecordingExecutor', function (): void {
+    Pipeline::fake()->recording();
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        JobPipeline::parallel([TrackExecutionJobB::class, TrackExecutionJobC::class]),
+    ])->send(new SimpleContext)->run();
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobC::class,
+    ]);
 });

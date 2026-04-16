@@ -20,7 +20,7 @@ final class PipelineDefinition
     /**
      * Create a new pipeline definition.
      *
-     * @param array<int, StepDefinition> $steps Ordered list of step definitions (must not be empty).
+     * @param array<int, StepDefinition|ParallelStepGroup> $steps Ordered list of step definitions (must not be empty). Parallel groups occupy a single outer position.
      * @param bool $shouldBeQueued Whether the pipeline should be dispatched to the queue.
      * @param string|null $name Optional human-readable pipeline name.
      * @param array<int, Closure> $beforeEachHooks Closures to run before each step.
@@ -39,6 +39,7 @@ final class PipelineDefinition
      * @throws InvalidPipelineDefinition When the steps array is empty.
      */
     public function __construct(
+        /** @var array<int, StepDefinition|ParallelStepGroup> */
         public readonly array $steps,
         public readonly bool $shouldBeQueued = false,
         public readonly ?string $name = null,
@@ -61,9 +62,13 @@ final class PipelineDefinition
     }
 
     /**
-     * Get the number of steps in this pipeline.
+     * Get the number of OUTER positions in this pipeline.
      *
-     * @return int
+     * A ParallelStepGroup counts as a single position regardless of how
+     * many sub-steps it contains. For the total expanded sub-step count,
+     * use flatStepCount() instead.
+     *
+     * @return int The number of top-level step positions (parallel groups count as one).
      */
     public function stepCount(): int
     {
@@ -71,7 +76,36 @@ final class PipelineDefinition
     }
 
     /**
+     * Get the total number of SUB-STEPS across the pipeline.
+     *
+     * Parallel groups expand to their inner sub-step count; non-parallel
+     * entries count as one. Used for observability and test assertions
+     * where the expanded job count matters (e.g., "this pipeline dispatches
+     * N queued jobs across parallel batches").
+     *
+     * @return int The total count of StepDefinition instances (parallel groups expanded).
+     */
+    public function flatStepCount(): int
+    {
+        $total = 0;
+
+        foreach ($this->steps as $step) {
+            $total += $step instanceof ParallelStepGroup
+                ? count($step->steps)
+                : 1;
+        }
+
+        return $total;
+    }
+
+    /**
      * Build a compensation mapping from the pipeline steps.
+     *
+     * Iterates outer positions and, for ParallelStepGroup positions,
+     * recurses into their sub-steps so each sub-step with a compensation
+     * class is registered on the flat mapping. The resulting shape is
+     * unchanged from the non-parallel case: a class-name-keyed lookup used
+     * by the saga compensation chain at reverse-order rollback time.
      *
      * @return array<string, string> Map of step class name to compensation class name.
      */
@@ -80,6 +114,16 @@ final class PipelineDefinition
         $mapping = [];
 
         foreach ($this->steps as $step) {
+            if ($step instanceof ParallelStepGroup) {
+                foreach ($step->steps as $subStep) {
+                    if ($subStep->compensationJobClass !== null) {
+                        $mapping[$subStep->jobClass] = $subStep->compensationJobClass;
+                    }
+                }
+
+                continue;
+            }
+
             if ($step->compensationJobClass !== null) {
                 $mapping[$step->jobClass] = $step->compensationJobClass;
             }
