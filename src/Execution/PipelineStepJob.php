@@ -624,21 +624,28 @@ final class PipelineStepJob implements ShouldQueue
      *  - `->name("pipeline:{pipelineId}:parallel:{groupIndex}")` for Horizon
      *    observability.
      *  - `->allowFailures()` so siblings run to completion under any fail
-     *    strategy; FailStrategy branching happens in the `then` continuation.
-     *  - `->then($closure)` registered as a SerializableClosure-wrapped
+     *    strategy; FailStrategy branching happens in the fan-in continuation.
+     *  - `->finally($closure)` registered as a SerializableClosure-wrapped
      *    callable capturing the group index, sub-step count, outer manifest
-     *    snapshot, and pre-batch context baseline. The closure recovers
-     *    per-sub-step final contexts from cache via
-     *    ParallelStepJob::contextCacheKey(), merges them via
-     *    ParallelContextMerger::merge(), rebuilds a fresh manifest with the
-     *    merged context, and either dispatches the next PipelineStepJob (on
-     *    success or SkipAndContinue), dispatches the compensation chain (on
-     *    StopAndCompensate), or fires terminal onFailure/onComplete
-     *    callbacks (on StopImmediately). The fan-in closure treats a
-     *    failed-batch-under-SkipAndContinue as a continuation event.
+     *    snapshot, and pre-batch context baseline. `finally` (not `then`) is
+     *    required here because Laravel's `then` only fires when pending_jobs
+     *    hits 0, and `recordFailedJob` does NOT decrement pending_jobs under
+     *    allowFailures() — so a `then`-based fan-in would hang whenever any
+     *    sub-step fails. `finally` fires when allJobsHaveRanExactlyOnce()
+     *    returns true (pending - failed === 0), which covers both all-success
+     *    and partial-failure paths. The closure recovers per-sub-step final
+     *    contexts from cache via ParallelStepJob::contextCacheKey(), merges
+     *    them via ParallelContextMerger::merge(), rebuilds a fresh manifest
+     *    with the merged context, and either dispatches the next
+     *    PipelineStepJob (on success or SkipAndContinue), dispatches the
+     *    compensation chain (on StopAndCompensate), or fires terminal
+     *    onFailure/onComplete callbacks (on StopImmediately).
+     *  - `->catch($closure)` registered for observability only — logs the
+     *    first failure so operators see a signal before the fan-in pass.
+     *    Does NOT drive control flow.
      *
      * The outer PipelineStepJob returns immediately after the batch is
-     * dispatched; the next-step dispatch lives entirely inside the `then`
+     * dispatched; the next-step dispatch lives entirely inside the `finally`
      * callback to avoid racing with the asynchronous batch completion.
      *
      * @param int $groupIndex The outer pipeline position of the parallel group.
@@ -685,7 +692,16 @@ final class PipelineStepJob implements ShouldQueue
         $outerManifestSnapshot = unserialize(serialize($this->manifest));
         $subCount = count($subStepClasses);
 
-        $thenCallback = new SerializableClosure(function (Batch $batch) use (
+        // Fan-in continuation: registered as `->finally()` so it fires once
+        // all sub-step jobs have RUN (pending - failed === 0), not only when
+        // they all succeeded. Laravel's `->then()` is wired to
+        // recordSuccessfulJob and only fires when pending_jobs hits 0;
+        // recordFailedJob increments failed_jobs WITHOUT decrementing
+        // pending_jobs, so any failure under allowFailures() would leave a
+        // then-based fan-in stranded forever. `->finally()` is the only
+        // native hook that covers both the all-success and partial-failure
+        // paths, which is the correct semantic for FailStrategy branching.
+        $finalizeCallback = new SerializableClosure(function (Batch $batch) use (
             $outerManifestSnapshot,
             $baselineContext,
             $pipelineId,
@@ -705,9 +721,9 @@ final class PipelineStepJob implements ShouldQueue
         });
 
         // Observability hook: log the first batch-job failure so operators
-        // get an early signal before the `then` callback's aggregate pass.
-        // Under allowFailures() Laravel still runs `then` after all jobs
-        // complete, so `catch` is additive observability, not control flow.
+        // get an early signal before the fan-in aggregate pass. `catch`
+        // fires once on the first failure regardless of allowFailures(); it
+        // is additive observability, not control flow.
         $catchCallback = new SerializableClosure(function (Batch $batch, Throwable $exception) use ($pipelineId, $groupIndex): void {
             Log::warning('Pipeline parallel batch caught a sub-step failure', [
                 'pipelineId' => $pipelineId,
@@ -720,7 +736,7 @@ final class PipelineStepJob implements ShouldQueue
             Bus::batch($jobs)
                 ->name("pipeline:{$pipelineId}:parallel:{$groupIndex}")
                 ->allowFailures()
-                ->then($thenCallback->getClosure())
+                ->finally($finalizeCallback->getClosure())
                 ->catch($catchCallback->getClosure())
                 ->dispatch();
         } catch (Throwable $dispatchException) {

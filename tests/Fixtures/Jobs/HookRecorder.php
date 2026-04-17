@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs;
 
+use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+
 /**
  * Static recording fixture used by hook tests that cross the queue boundary.
  *
@@ -50,6 +52,30 @@ final class HookRecorder
     public static ?\Throwable $capturedException = null;
 
     /**
+     * Pipeline context captured by the most recent onSuccess / onFailure /
+     * onComplete callback invocation.
+     *
+     * Mirrors $capturedException as a singular slot: integration tests that
+     * need to assert whether callbacks observed a null or populated context
+     * (e.g. AC #6 context-less fan-in) store the first argument into this
+     * static from inside a SerializableClosure-friendly callback body.
+     * Cleared by reset(). A boolean companion $contextWasCaptured records
+     * whether any callback fired so tests can distinguish "null context
+     * observed" from "no callback ever fired".
+     */
+    public static ?PipelineContext $capturedContext = null;
+
+    /**
+     * Whether any callback has populated $capturedContext during the current test.
+     *
+     * Distinguishes "callback fired with a null context" (true + null) from
+     * "callback never fired" (false + null). Reset between tests.
+     *
+     * @var bool
+     */
+    public static bool $contextWasCaptured = false;
+
+    /**
      * Reset all static recording arrays. Call from test beforeEach hooks.
      *
      * @return void
@@ -62,5 +88,7 @@ final class HookRecorder
         self::$order = [];
         self::$fired = [];
         self::$capturedException = null;
+        self::$capturedContext = null;
+        self::$contextWasCaptured = false;
     }
 }
