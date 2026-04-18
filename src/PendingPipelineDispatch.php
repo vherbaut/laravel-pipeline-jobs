@@ -268,6 +268,40 @@ class PendingPipelineDispatch
     }
 
     /**
+     * Proxies PipelineBuilder::addConditionalBranch() and returns the wrapper for chainability.
+     *
+     * Append a pre-built ConditionalBranch to the pipeline.
+     *
+     * @param ConditionalBranch $branch Pre-built conditional branch wrapping a selector and branch values.
+     * @return static
+     */
+    public function addConditionalBranch(ConditionalBranch $branch): static
+    {
+        $this->builder->addConditionalBranch($branch);
+
+        return $this;
+    }
+
+    /**
+     * Proxies PipelineBuilder::branch() and returns the wrapper for chainability.
+     *
+     * Append a conditional branch group built from a selector closure and a branches map.
+     *
+     * @param Closure $selector Selector closure typed Closure(PipelineContext): string.
+     * @param array<array-key, mixed> $branches Map of branch keys to step values (class-string, StepDefinition, NestedPipeline, PipelineBuilder, or PipelineDefinition).
+     * @param string|null $name Optional user-visible branch name for observability; defaults to null.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $branches is empty, carries a blank key, contains a ParallelStepGroup, or contains an unsupported value type.
+     */
+    public function branch(Closure $selector, array $branches, ?string $name = null): static
+    {
+        $this->builder->branch($selector, $branches, $name);
+
+        return $this;
+    }
+
+    /**
      * Proxies PipelineBuilder::when() and returns the wrapper for chainability.
      *
      * Append a step that only runs when the condition evaluates to true.

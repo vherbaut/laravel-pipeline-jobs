@@ -8,7 +8,13 @@ use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobB;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobC;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobA;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobC;
 
 it('can be created from a list of StepDefinitions', function () {
     $steps = [
@@ -298,4 +304,97 @@ it('compensationMapping later-key-wins when an inner entry duplicates an outer c
     expect($definition->compensationMapping())->toBe([
         'App\\Jobs\\SharedJob' => 'App\\Jobs\\InnerSharedCompensate',
     ]);
+});
+
+it('stepCount counts a ConditionalBranch as one outer position', function (): void {
+    $definition = JobPipeline::make([
+        FakeJobA::class,
+        Step::branch(
+            fn ($ctx) => 'a',
+            [
+                'a' => FakeJobB::class,
+                'b' => FakeJobC::class,
+            ],
+        ),
+    ])->build();
+
+    expect($definition->stepCount())->toBe(2);
+});
+
+it('flatStepCount returns the max across branch values for all-flat branches', function (): void {
+    $definition = JobPipeline::make([
+        FakeJobA::class,
+        Step::branch(
+            fn ($ctx) => 'a',
+            [
+                'a' => FakeJobB::class,
+                'b' => FakeJobC::class,
+            ],
+        ),
+    ])->build();
+
+    expect($definition->flatStepCount())->toBe(2);
+});
+
+it('flatStepCount returns the max across branch values mixing flat and nested', function (): void {
+    $nested = JobPipeline::make([
+        FakeJobB::class,
+        FakeJobC::class,
+        FakeJobA::class,
+    ]);
+
+    $definition = JobPipeline::make([
+        FakeJobA::class,
+        Step::branch(
+            fn ($ctx) => 'a',
+            [
+                'flat' => FakeJobB::class,
+                'nested' => $nested,
+            ],
+        ),
+    ])->build();
+
+    expect($definition->flatStepCount())->toBe(4);
+});
+
+it('compensationMapping merges compensation entries across all branch values', function (): void {
+    $stepWithComp = Step::make(FakeJobB::class)
+        ->withCompensation(CompensateJobB::class);
+    $innerBuilder = JobPipeline::make([
+        Step::make(FakeJobC::class)
+            ->withCompensation(CompensateJobC::class),
+    ]);
+
+    $definition = JobPipeline::make([
+        FakeJobA::class,
+        Step::branch(
+            fn ($ctx) => 'a',
+            [
+                'flat' => $stepWithComp,
+                'nested' => $innerBuilder,
+            ],
+        ),
+    ])->build();
+
+    expect($definition->compensationMapping())
+        ->toBe([
+            FakeJobB::class => CompensateJobB::class,
+            FakeJobC::class => CompensateJobC::class,
+        ]);
+});
+
+it('compensationMapping last-wins when two branches declare the same class with different compensations', function (): void {
+    $left = Step::make(FakeJobB::class)
+        ->withCompensation(CompensateJobB::class);
+    $right = Step::make(FakeJobB::class)
+        ->withCompensation(CompensateJobC::class);
+
+    $definition = JobPipeline::make([
+        Step::branch(fn ($ctx) => 'a', ['left' => $left, 'right' => $right]),
+    ])->build();
+
+    expect($definition->compensationMapping())
+        ->toBe([
+            FakeJobB::class => CompensateJobC::class,
+        ]);
 });

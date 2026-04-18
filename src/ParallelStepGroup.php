@@ -27,8 +27,12 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
  *
  * Conditions on parallel groups are also rejected at build time: individual
  * sub-steps may carry their own Step::when() / Step::unless() closures, but
- * no aggregate when()/unless() is available on the group itself (Story 8.3
- * covers conditional branching).
+ * no aggregate when()/unless() is available on the group itself. Story 8.3
+ * landed ConditionalBranch as the fourth slot type, but branches inside a
+ * parallel group are EXPLICITLY REJECTED via
+ * InvalidPipelineDefinition::conditionalBranchInsideParallelGroup(): parallel
+ * deep-clones the manifest per sub-step, multiplying the selector evaluation
+ * across workers and breaking the single-branch-wins semantic.
  *
  * Payload footprint (NFR11): a parallel group with N sub-steps multiplies
  * the queued payload footprint by N during the batch window because every
@@ -107,6 +111,10 @@ final class ParallelStepGroup
 
             if ($job instanceof NestedPipeline) {
                 throw InvalidPipelineDefinition::nestedPipelineInsideParallelGroup();
+            }
+
+            if ($job instanceof ConditionalBranch) {
+                throw InvalidPipelineDefinition::conditionalBranchInsideParallelGroup();
             }
 
             throw new InvalidPipelineDefinition(

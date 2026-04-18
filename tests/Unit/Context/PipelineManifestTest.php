@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Laravel\SerializableClosure\SerializableClosure;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
@@ -235,4 +236,78 @@ it('withRekeyedStepConfig returns a deep-cloned manifest with the replaced stepC
     expect($rekeyed)->not->toBe($original)
         ->and($rekeyed->stepConfigs[1])->toBe($parallelShape)
         ->and($original->stepConfigs[1]['type'])->toBe('nested');
+});
+
+it('withRebrandedStepEntry returns a deep-cloned manifest with replaced stepClasses/stepConfigs/stepConditions entries', function (): void {
+    $original = PipelineManifest::create(
+        stepClasses: [
+            'App\\Jobs\\A',
+            [
+                'type' => 'branch',
+                'name' => null,
+                'selector' => new SerializableClosure(fn ($ctx) => 'a'),
+                'branches' => ['a' => 'App\\Jobs\\Left', 'b' => 'App\\Jobs\\Right'],
+            ],
+        ],
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+            1 => [
+                'type' => 'branch',
+                'configs' => [
+                    'a' => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+                    'b' => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+                ],
+            ],
+        ],
+        stepConditions: [
+            1 => [
+                'type' => 'branch',
+                'entries' => ['a' => null, 'b' => null],
+            ],
+        ],
+    );
+
+    $leftConfig = ['queue' => 'left-queue', 'connection' => null, 'sync' => false, 'retry' => 3, 'backoff' => null, 'timeout' => null];
+
+    $rebranded = $original->withRebrandedStepEntry(1, 'App\\Jobs\\Left', $leftConfig, null);
+
+    expect($rebranded)->not->toBe($original)
+        ->and($rebranded->stepClasses[1])->toBe('App\\Jobs\\Left')
+        ->and($rebranded->stepConfigs[1])->toBe($leftConfig)
+        ->and($rebranded->stepConditions)->not->toHaveKey(1)
+        ->and($original->stepClasses[1]['type'])->toBe('branch')
+        ->and($original->stepConditions[1]['type'])->toBe('branch');
+});
+
+it('withRebrandedStepEntry preserves existing condition entry when a non-null replacement is passed', function (): void {
+    $closure = new SerializableClosure(fn ($ctx) => true);
+    $original = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\A', 'App\\Jobs\\Old'],
+        stepConfigs: [0 => [], 1 => []],
+        stepConditions: [],
+    );
+
+    $newCondition = ['closure' => $closure, 'negated' => true];
+    $rebranded = $original->withRebrandedStepEntry(1, 'App\\Jobs\\New', [], $newCondition);
+
+    expect($rebranded->stepConditions[1])->toBeArray()
+        ->and($rebranded->stepConditions[1])->toHaveKeys(['closure', 'negated'])
+        ->and($rebranded->stepConditions[1]['negated'])->toBeTrue()
+        ->and($rebranded->stepConditions[1]['closure'])->toBeInstanceOf(SerializableClosure::class)
+        ->and($rebranded->stepClasses[1])->toBe('App\\Jobs\\New');
+});
+
+it('stepClassAt returns the branch shape verbatim when the cursor path lands on the branch outer position', function (): void {
+    $branchShape = [
+        'type' => 'branch',
+        'name' => 'routing',
+        'selector' => new SerializableClosure(fn ($ctx) => 'a'),
+        'branches' => ['a' => 'App\\Jobs\\Left', 'b' => 'App\\Jobs\\Right'],
+    ];
+
+    $manifest = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\A', $branchShape],
+    );
+
+    expect($manifest->stepClassAt([1]))->toBe($branchShape);
 });

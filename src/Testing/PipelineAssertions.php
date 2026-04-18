@@ -6,6 +6,7 @@ namespace Vherbaut\LaravelPipelineJobs\Testing;
 
 use Closure;
 use PHPUnit\Framework\Assert as PHPUnit;
+use Vherbaut\LaravelPipelineJobs\ConditionalBranch;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
@@ -293,6 +294,80 @@ trait PipelineAssertions
                     $index + 1,
                     $group['name'] ?? '<null>',
                     implode(', ', array_map(static fn (string $class): string => class_basename($class), $group['classes'])),
+                ),
+                $actualGroups,
+                array_keys($actualGroups),
+            )),
+        ));
+    }
+
+    /**
+     * Assert that a recorded pipeline contains a conditional branch group matching the expected branch keys.
+     *
+     * Walks the resolved pipeline's `$definition->steps`, locates any
+     * ConditionalBranch wrapper whose declared branch keys match
+     * `$expectedKeys` exactly (order-sensitive since PHP arrays preserve
+     * insertion order), and optionally filters by the wrapper's `$name`
+     * slot when `$name !== null`. Fails with a listing of the recorded
+     * branch groups when no match is found. When no branch group was
+     * recorded at all, fails with a clear "no conditional branches
+     * recorded" message.
+     *
+     * Available in default Pipeline::fake() mode and in recording mode
+     * (does NOT require recording mode — the assertion inspects the
+     * recorded definition, not execution traces).
+     *
+     * @param array<int, string> $expectedKeys Branch keys in expected declaration order.
+     * @param string|null $name Optional branch group name to match; null matches any name.
+     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
+     * @return void
+     */
+    public function assertConditionalBranchExecuted(array $expectedKeys, ?string $name = null, ?int $pipelineIndex = null): void
+    {
+        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
+
+        $actualGroups = [];
+
+        foreach ($recorded->definition->steps as $step) {
+            if (! $step instanceof ConditionalBranch) {
+                continue;
+            }
+
+            if ($name !== null && $step->name !== $name) {
+                continue;
+            }
+
+            $keys = array_keys($step->branches);
+
+            $actualGroups[] = ['name' => $step->name, 'keys' => $keys];
+
+            if ($keys === $expectedKeys) {
+                return;
+            }
+        }
+
+        $nameSuffix = $name !== null ? sprintf(' with name "%s"', $name) : '';
+        $expectedLabel = implode(', ', array_map(static fn (string $key): string => '"'.$key.'"', $expectedKeys));
+
+        if ($actualGroups === []) {
+            PHPUnit::fail(sprintf(
+                'Expected a recorded conditional branch%s with keys [%s], but the resolved pipeline recorded no conditional branches.',
+                $nameSuffix,
+                $expectedLabel,
+            ));
+        }
+
+        PHPUnit::fail(sprintf(
+            "Expected a recorded conditional branch%s with keys [%s], but none of the %d recorded branch group(s) matched.\n\nRecorded conditional branches:\n%s",
+            $nameSuffix,
+            $expectedLabel,
+            count($actualGroups),
+            implode("\n", array_map(
+                static fn (array $group, int $index): string => sprintf(
+                    '  %d. (name: %s) [%s]',
+                    $index + 1,
+                    $group['name'] ?? '<null>',
+                    implode(', ', array_map(static fn (string $key): string => '"'.$key.'"', $group['keys'])),
                 ),
                 $actualGroups,
                 array_keys($actualGroups),

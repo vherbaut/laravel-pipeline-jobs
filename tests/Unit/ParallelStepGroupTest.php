@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Vherbaut\LaravelPipelineJobs\ConditionalBranch;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\NestedPipeline;
@@ -73,6 +74,16 @@ it('rejects a NestedPipeline entry with the Story 8.2 nestedPipelineInsideParall
         ->toThrow(
             InvalidPipelineDefinition::class,
             'Nested pipelines cannot be embedded inside parallel step groups',
+        );
+});
+
+it('rejects a ConditionalBranch entry with the Story 8.3 conditionalBranchInsideParallelGroup factory', function (): void {
+    $branch = ConditionalBranch::fromArray(fn ($ctx) => 'k', ['k' => FakeJobA::class]);
+
+    expect(fn () => ParallelStepGroup::fromArray([FakeJobA::class, $branch]))
+        ->toThrow(
+            InvalidPipelineDefinition::class,
+            'Conditional branches cannot be embedded inside parallel step groups',
         );
 });
 

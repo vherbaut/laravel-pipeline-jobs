@@ -175,14 +175,14 @@ final class PipelineManifest
      *
      * @param string $pipelineId Unique identifier for this pipeline run (UUID).
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
-     * @param array<int, string|array<string, mixed>> $stepClasses Ordered list of job class names. Parallel-group positions carry a nested `['type' => 'parallel', 'classes' => array<int, string>]` shape in lieu of a flat class-string.
+     * @param array<int, string|array<string, mixed>> $stepClasses Ordered list of job class names. Group positions carry a discriminator-tagged array in lieu of a flat class-string. FOUR union shapes are supported: flat string (unconditional step), `['type' => 'parallel', 'classes' => array<int, string>]` (parallel sub-group), `['type' => 'nested', 'name' => ?string, 'steps' => array<int, ...>]` (nested sub-pipeline; recursive), and `['type' => 'branch', 'name' => ?string, 'selector' => SerializableClosure, 'branches' => array<string, string|array{type: 'nested', ...}>]` (conditional branch; branch values are flat class-strings OR nested shapes — parallel is rejected as a branch value at build time).
      * @param array<string, string> $compensationMapping Map of step class name to compensation class name.
-     * @param array<int, array<string, mixed>> $stepConditions Per-step condition entries keyed by step index. Parallel groups carry a nested `['type' => 'parallel', 'entries' => [...]]` shape where each inner entry is the flat shape or null for an unconditional sub-step.
+     * @param array<int, array<string, mixed>> $stepConditions Per-step condition entries keyed by step index. Group positions carry a discriminator-tagged array whose four shapes mirror $stepClasses: parallel `['type' => 'parallel', 'entries' => [...]]`, nested `['type' => 'nested', 'entries' => [...]]`, branch `['type' => 'branch', 'entries' => array<string, <flat entry>|null|array{type: 'nested', entries: ...}>]` with one entry per branch key.
      * @param int $currentStepIndex Index of the current step being executed.
      * @param array<int, string> $completedSteps List of completed step class names.
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so queued executors can decide whether to trigger compensation after a step failure.
-     * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry count / backoff delay (seconds) / wrapper timeout (seconds) configuration indexed by step position. Parallel groups carry a nested `['type' => 'parallel', 'configs' => [...]]` shape where each inner entry is the flat config shape per sub-step.
+     * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry count / backoff delay (seconds) / wrapper timeout (seconds) configuration indexed by step position. Group positions carry a discriminator-tagged array whose four shapes mirror $stepClasses: parallel `['type' => 'parallel', 'configs' => [...]]`, nested `['type' => 'nested', 'configs' => [...]]`, branch `['type' => 'branch', 'configs' => array<string, <flat config>|array{type: 'nested', configs: ...}>]` with one config entry per branch key.
      */
     public function __construct(
         public readonly string $pipelineId,
@@ -205,13 +205,13 @@ final class PipelineManifest
     /**
      * Create a new pipeline manifest with auto-generated UUID and default execution state.
      *
-     * @param array<int, string|array<string, mixed>> $stepClasses Ordered list of job class names; parallel positions carry a nested shape.
+     * @param array<int, string|array<string, mixed>> $stepClasses Ordered list of job class names; group positions carry a discriminator-tagged array (parallel / nested / branch — see constructor docblock for the four-shape union).
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param array<string, string> $compensationMapping Map of step class name to compensation class name.
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
-     * @param array<int, array<string, mixed>> $stepConditions Per-step condition entries keyed by step index; parallel groups carry a nested shape.
+     * @param array<int, array<string, mixed>> $stepConditions Per-step condition entries keyed by step index; group positions carry a discriminator-tagged array (parallel / nested / branch).
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so executors can decide whether to trigger compensation after a step failure.
-     * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry / backoff / timeout configuration indexed by step position; parallel positions carry a nested shape.
+     * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry / backoff / timeout configuration indexed by step position; group positions carry a discriminator-tagged array (parallel / nested / branch).
      *
      * @return self
      */
@@ -388,15 +388,236 @@ final class PipelineManifest
     }
 
     /**
+     * Produce a deep-cloned manifest whose stepClasses / stepConfigs / stepConditions entries at $index are replaced.
+     *
+     * The readonly $stepClasses / $stepConfigs / $stepConditions properties
+     * forbid in-place mutation after construction, so this helper re-hydrates
+     * a fresh instance through the __serialize / __unserialize lifecycle
+     * with the replacement entries substituted into the serialized array.
+     * All other readonly and mutable state (hooks, callbacks, context,
+     * currentStepIndex, completedSteps, nestedCursor, etc.) is deep-cloned
+     * via serialize / unserialize so downstream workers operate on
+     * independent state.
+     *
+     * Intended caller: PipelineStepJob::handleConditionalBranch() — after
+     * the selector resolves a branch key, the three entries at the branch's
+     * outer position are rewritten into the SELECTED branch's shape (flat
+     * class-string or nested-pipeline shape) so the next wrapper's handle()
+     * sees a plain non-branch shape and routes through the existing flat /
+     * nested code path without re-evaluating the selector.
+     *
+     * When $conditionEntry === null, the stepConditions[$index] key is
+     * removed (via array_key_exists + unset) so the downstream flat/nested
+     * code path reads the absence as "unconditional" — consistent with the
+     * lean-payload policy for unconditional steps.
+     *
+     * @param int $index The zero-based outer position whose stepClasses / stepConfigs / stepConditions entries are replaced.
+     * @param string|array<string, mixed> $classEntry The replacement stepClasses entry at that position (flat class-string or nested-pipeline shape).
+     * @param array<string, mixed> $configEntry The replacement stepConfigs entry at that position.
+     * @param array<string, mixed>|null $conditionEntry The replacement stepConditions entry at that position, or null to remove the entry (unconditional).
+     *
+     * @return self A deep-cloned manifest with the replacements applied.
+     */
+    public function withRebrandedStepEntry(int $index, string|array $classEntry, array $configEntry, ?array $conditionEntry): self
+    {
+        $data = $this->__serialize();
+        /** @var array<int, string|array<string, mixed>> $stepClasses */
+        $stepClasses = $data['stepClasses'];
+        $stepClasses[$index] = $classEntry;
+        $data['stepClasses'] = $stepClasses;
+
+        /** @var array<int, array<string, mixed>> $stepConfigs */
+        $stepConfigs = $data['stepConfigs'];
+        $stepConfigs[$index] = $configEntry;
+        $data['stepConfigs'] = $stepConfigs;
+
+        /** @var array<int, array<string, mixed>> $stepConditions */
+        $stepConditions = $data['stepConditions'];
+
+        if ($conditionEntry === null) {
+            if (array_key_exists($index, $stepConditions)) {
+                unset($stepConditions[$index]);
+            }
+        } else {
+            $stepConditions[$index] = $conditionEntry;
+        }
+
+        $data['stepConditions'] = $stepConditions;
+
+        /** @var self $rehydrated */
+        $rehydrated = (new ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        /** @var array<string, mixed> $deepCloned */
+        $deepCloned = unserialize(serialize($data));
+        $rehydrated->__unserialize($deepCloned);
+
+        return $rehydrated;
+    }
+
+    /**
+     * Produce a deep-cloned manifest whose stepClasses / stepConfigs / stepConditions entries at the given cursor path are replaced.
+     *
+     * Cursor-aware variant of withRebrandedStepEntry() that descends into
+     * nested-pipeline envelopes before replacing the target entry. Intended
+     * caller: PipelineStepJob::handleConditionalBranch() when the branch
+     * lives deep inside a nested pipeline (nestedCursor is non-empty at
+     * branch-wrapper time). A single-element path delegates to the flat
+     * outer-index rebrand for consistency.
+     *
+     * The descent uses the nested-envelope descend key for each tree:
+     * stepClasses descends via 'steps', stepConfigs via 'configs',
+     * stepConditions via 'entries'. Intermediate branch / parallel shapes
+     * cannot be descended through (cursor navigation does not enter those
+     * shape types) and will throw LogicException if the cursor path reaches
+     * them as an intermediate segment.
+     *
+     * When $conditionEntry === null, the stepConditions leaf at the cursor
+     * path is removed (via array_key_exists + unset); if the enclosing
+     * condition envelope itself does not exist (lean-payload elision), the
+     * removal is a no-op.
+     *
+     * @param array<int, int> $cursorPath Non-empty cursor path from outer root to the target position.
+     * @param string|array<string, mixed> $classEntry The replacement stepClasses entry (flat class-string or nested-pipeline shape).
+     * @param array<string, mixed> $configEntry The replacement stepConfigs entry at that position.
+     * @param array<string, mixed>|null $conditionEntry The replacement stepConditions entry, or null to remove the entry (unconditional).
+     *
+     * @return self A deep-cloned manifest with the replacements applied.
+     *
+     * @throws LogicException When $cursorPath is empty or cannot be navigated through existing nested envelopes.
+     */
+    public function withRebrandedStepEntryAtCursor(
+        array $cursorPath,
+        string|array $classEntry,
+        array $configEntry,
+        ?array $conditionEntry,
+    ): self {
+        if ($cursorPath === []) {
+            throw new LogicException(
+                'PipelineManifest::withRebrandedStepEntryAtCursor called with empty cursor path; use withRebrandedStepEntry for flat-index rebrand.',
+            );
+        }
+
+        if (count($cursorPath) === 1) {
+            return $this->withRebrandedStepEntry($cursorPath[0], $classEntry, $configEntry, $conditionEntry);
+        }
+
+        $data = $this->__serialize();
+
+        /** @var array<int, string|array<string, mixed>> $stepClasses */
+        $stepClasses = $data['stepClasses'];
+        self::replaceInNestedTree($stepClasses, $cursorPath, 'steps', $classEntry, removeIfNull: false);
+        $data['stepClasses'] = $stepClasses;
+
+        /** @var array<int, array<string, mixed>> $stepConfigs */
+        $stepConfigs = $data['stepConfigs'];
+        self::replaceInNestedTree($stepConfigs, $cursorPath, 'configs', $configEntry, removeIfNull: false);
+        $data['stepConfigs'] = $stepConfigs;
+
+        /** @var array<int, array<string, mixed>> $stepConditions */
+        $stepConditions = $data['stepConditions'];
+        self::replaceInNestedTree($stepConditions, $cursorPath, 'entries', $conditionEntry, removeIfNull: true);
+        $data['stepConditions'] = $stepConditions;
+
+        /** @var self $rehydrated */
+        $rehydrated = (new ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        /** @var array<string, mixed> $deepCloned */
+        $deepCloned = unserialize(serialize($data));
+        $rehydrated->__unserialize($deepCloned);
+
+        return $rehydrated;
+    }
+
+    /**
+     * Replace (or remove) the entry at the given cursor path inside a nested envelope tree.
+     *
+     * Descends from $tree[cursorPath[0]] via $descendKey at each intermediate
+     * cursor segment, then sets or removes $tree[...][cursorPath[last]].
+     *
+     * The tree is passed by reference; callers take a local copy from
+     * $this->__serialize() and write the mutated result back into the
+     * serialized payload before re-hydrating.
+     *
+     * @param array<int, mixed> $tree Root-level tree (stepClasses / stepConfigs / stepConditions) — mutated in place.
+     * @param array<int, int> $cursorPath Non-empty path from outer root.
+     * @param string $descendKey Key used to descend into inner array at each level ('steps', 'configs', or 'entries').
+     * @param mixed $value Replacement value (or null to remove the leaf).
+     * @param bool $removeIfNull When true and the outer envelope is absent, silently no-op instead of throwing (used for stepConditions where the envelope may be lean-payload elided).
+     *
+     * @return void
+     *
+     * @throws LogicException When the outer index is missing and $removeIfNull is false, or when an intermediate envelope lacks the expected $descendKey.
+     */
+    private static function replaceInNestedTree(
+        array &$tree,
+        array $cursorPath,
+        string $descendKey,
+        mixed $value,
+        bool $removeIfNull,
+    ): void {
+        $outer = $cursorPath[0];
+
+        if (! array_key_exists($outer, $tree)) {
+            if ($removeIfNull && $value === null) {
+                return;
+            }
+
+            throw new LogicException(
+                'PipelineManifest::replaceInNestedTree outer index '.$outer.' missing from tree.',
+            );
+        }
+
+        $node = &$tree[$outer];
+        $depth = count($cursorPath);
+
+        for ($i = 1; $i < $depth - 1; $i++) {
+            if (! is_array($node) || ! isset($node[$descendKey]) || ! is_array($node[$descendKey])) {
+                throw new LogicException(
+                    'PipelineManifest::replaceInNestedTree cannot descend via "'.$descendKey.'" at cursor depth '.$i.'.',
+                );
+            }
+
+            $node = &$node[$descendKey][$cursorPath[$i]];
+        }
+
+        $targetSegment = $cursorPath[$depth - 1];
+
+        if (! is_array($node) || ! isset($node[$descendKey]) || ! is_array($node[$descendKey])) {
+            throw new LogicException(
+                'PipelineManifest::replaceInNestedTree parent at cursor depth '.($depth - 1).' is not a valid nested envelope.',
+            );
+        }
+
+        if ($removeIfNull && $value === null) {
+            if (array_key_exists($targetSegment, $node[$descendKey])) {
+                unset($node[$descendKey][$targetSegment]);
+            }
+
+            return;
+        }
+
+        $node[$descendKey][$targetSegment] = $value;
+    }
+
+    /**
      * Navigate the nested-stepClasses tree to resolve the entry at the given cursor path.
      *
      * Empty path returns the top-level entry at the current $currentStepIndex
      * (behaves as a no-op lookup for non-nested execution). A one-element
      * path `[p]` returns stepClasses[p] verbatim (used sparingly: the cursor
      * is cleared to `[]` once execution returns to the outer level, so the
-     * single-element form mostly surfaces in transitional state). Longer
-     * paths recurse: the second element indexes into stepClasses[p]['steps']
-     * if the entry is a nested shape OR stepClasses[p]['classes'] if the
+     * single-element form mostly surfaces in transitional state).
+     *
+     * ConditionalBranch shapes are NOT navigated by the cursor: branch
+     * selection is resolved at execution time by
+     * SyncExecutor::executeConditionalBranch() (sync mode) or
+     * PipelineStepJob::handleConditionalBranch() (queued mode) which
+     * substitute the selected value into the manifest via
+     * withRebrandedStepEntry() BEFORE downstream cursor navigation resumes.
+     * Callers that land the cursor on a branch position receive the
+     * branch-shape entry verbatim.
+     *
+     * Longer paths recurse: the second element indexes into
+     * stepClasses[p]['steps'] if the entry is a nested shape OR
+     * stepClasses[p]['classes'] if the
      * entry is a parallel shape. The navigation stops when it lands on a
      * class-string or parallel-shape leaf; further path elements beyond the
      * nested-to-flat transition are a programmer error and throw
@@ -550,6 +771,13 @@ final class PipelineManifest
      * when the entry is absent / unconditional / group-shaped (group-shaped
      * entries are handled by the enclosing dispatcher, not evaluated as a
      * per-step condition here).
+     *
+     * ConditionalBranch shapes are opaque to cursor navigation: the branch
+     * is resolved at execution time and the selected branch's condition
+     * entry is rebranded onto the outer position via withRebrandedStepEntry()
+     * before downstream cursor navigation resumes. Landing the cursor on a
+     * branch position returns null (the branch-shape entry's `type` key is
+     * detected and treated as group-shaped).
      *
      * @param array<int, int> $path Cursor path from outer-root down to the target entry. Empty path resolves to the current outer index.
      *

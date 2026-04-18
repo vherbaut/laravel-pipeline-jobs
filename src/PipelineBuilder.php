@@ -21,7 +21,7 @@ use Vherbaut\LaravelPipelineJobs\Execution\SyncExecutor;
  */
 final class PipelineBuilder
 {
-    /** @var array<int, StepDefinition|ParallelStepGroup|NestedPipeline> */
+    /** @var array<int, StepDefinition|ParallelStepGroup|NestedPipeline|ConditionalBranch> */
     private array $steps = [];
 
     private PipelineContext|Closure|null $context = null;
@@ -69,28 +69,30 @@ final class PipelineBuilder
      * Create a new pipeline builder.
      *
      * Accepts a mixed list of job class names, pre-built StepDefinition
-     * instances, ParallelStepGroup instances, and NestedPipeline instances.
-     * Strings are converted via StepDefinition::fromJobClass();
-     * StepDefinition instances (produced by Step::when(), Step::unless(), or
-     * Step::make()) are appended as-is; ParallelStepGroup instances are
-     * appended as a single outer position whose sub-steps fan out at
-     * execution time; NestedPipeline instances are appended as a single
-     * outer position whose inner pipeline runs sequentially with the shared
-     * PipelineContext. For ergonomic authoring, bare PipelineBuilder and
-     * PipelineDefinition entries are auto-wrapped into NestedPipeline (with
-     * a null name) so callers can inline a sub-pipeline directly in the
-     * array form. Any other type triggers InvalidPipelineDefinition at
-     * construction time so user code does not silently build an invalid
-     * pipeline at runtime.
+     * instances, ParallelStepGroup instances, NestedPipeline instances, and
+     * ConditionalBranch instances. Strings are converted via
+     * StepDefinition::fromJobClass(); StepDefinition instances (produced by
+     * Step::when(), Step::unless(), or Step::make()) are appended as-is;
+     * ParallelStepGroup instances are appended as a single outer position
+     * whose sub-steps fan out at execution time; NestedPipeline instances
+     * are appended as a single outer position whose inner pipeline runs
+     * sequentially with the shared PipelineContext; ConditionalBranch
+     * instances are appended as a single outer position whose selector
+     * closure resolves ONE branch path at runtime. For ergonomic authoring,
+     * bare PipelineBuilder and PipelineDefinition entries are auto-wrapped
+     * into NestedPipeline (with a null name) so callers can inline a
+     * sub-pipeline directly in the array form. Any other type triggers
+     * InvalidPipelineDefinition at construction time so user code does not
+     * silently build an invalid pipeline at runtime.
      *
      * The declared item type intentionally widens to mixed because callers
      * may pass untrusted data (e.g., from configuration) and the runtime
      * check exists precisely to catch that case.
      *
-     * @param array<int, mixed> $jobs Job class names, pre-built StepDefinition instances, ParallelStepGroup instances, NestedPipeline instances, or bare PipelineBuilder / PipelineDefinition instances auto-wrapped into NestedPipeline.
+     * @param array<int, mixed> $jobs Job class names, pre-built StepDefinition instances, ParallelStepGroup instances, NestedPipeline instances, ConditionalBranch instances, or bare PipelineBuilder / PipelineDefinition instances auto-wrapped into NestedPipeline.
      * @return void
      *
-     * @throws InvalidPipelineDefinition When an array item is none of: class-string, StepDefinition, ParallelStepGroup, NestedPipeline, PipelineBuilder, or PipelineDefinition; also propagated from PipelineBuilder::build() when auto-wrapping an empty builder.
+     * @throws InvalidPipelineDefinition When an array item is none of: class-string, StepDefinition, ParallelStepGroup, NestedPipeline, ConditionalBranch, PipelineBuilder, or PipelineDefinition; also propagated from PipelineBuilder::build() when auto-wrapping an empty builder.
      */
     public function __construct(array $jobs = [])
     {
@@ -119,6 +121,12 @@ final class PipelineBuilder
                 continue;
             }
 
+            if ($job instanceof ConditionalBranch) {
+                $this->steps[] = $job;
+
+                continue;
+            }
+
             if ($job instanceof self) {
                 $this->steps[] = NestedPipeline::fromBuilder($job);
 
@@ -132,7 +140,7 @@ final class PipelineBuilder
             }
 
             throw new InvalidPipelineDefinition(
-                'Pipeline definition items must be class-string, StepDefinition, ParallelStepGroup, or NestedPipeline instances '
+                'Pipeline definition items must be class-string, StepDefinition, ParallelStepGroup, NestedPipeline, or ConditionalBranch instances '
                 .'(PipelineBuilder and PipelineDefinition are auto-wrapped into NestedPipeline), got '.get_debug_type($job).'.',
             );
         }
@@ -263,6 +271,58 @@ final class PipelineBuilder
         }
 
         return $this->addNestedPipeline(NestedPipeline::fromDefinition($pipeline, $name));
+    }
+
+    /**
+     * Append a pre-built ConditionalBranch to the pipeline.
+     *
+     * Symmetric with addStep() / addParallelGroup() / addNestedPipeline():
+     * the branch wrapper occupies ONE outer position in the pipeline's
+     * internal steps array. Inner branch values are NOT flattened; the
+     * selector closure is evaluated at run time and ONE branch path runs
+     * in place of the branch position. Exposed publicly so advanced callers
+     * can hand-craft a ConditionalBranch via ConditionalBranch::fromArray()
+     * and pass it through addConditionalBranch() without going through the
+     * fluent branch() shortcut.
+     *
+     * @param ConditionalBranch $branch Pre-built conditional branch wrapping a selector and branch values.
+     *
+     * @return static
+     */
+    public function addConditionalBranch(ConditionalBranch $branch): static
+    {
+        $this->steps[] = $branch;
+
+        return $this;
+    }
+
+    /**
+     * Append a conditional branch group built from a selector closure and a branches map.
+     *
+     * Fluent shorthand for addConditionalBranch(ConditionalBranch::fromArray($selector, $branches, $name)).
+     * Per-step mutators (compensateWith, onQueue, onConnection, sync, retry,
+     * backoff, timeout) chained immediately after branch() throw
+     * InvalidPipelineDefinition because each branch value carries its own
+     * per-branch configuration on the underlying StepDefinition /
+     * NestedPipeline; apply those mutators to individual branch values
+     * before wrapping them via JobPipeline::branch([...]).
+     *
+     * Branches converge to the next outer step after the selected branch
+     * completes (FR26, FR27). The selector is guaranteed to run EXACTLY
+     * ONCE per branch traversal (sync inline, queued on the branch wrapper
+     * before the next wrapper dispatches).
+     *
+     * @param Closure $selector Selector closure typed Closure(PipelineContext): string.
+     * @param array<array-key, mixed> $branches Map of branch keys to step values (class-string, StepDefinition, NestedPipeline, PipelineBuilder, or PipelineDefinition).
+     * @param string|null $name Optional user-visible branch name for observability; defaults to null.
+     *
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $branches is empty, carries a blank key, contains a ParallelStepGroup, or contains an unsupported value type.
+     */
+    public function branch(Closure $selector, array $branches, ?string $name = null): static
+    {
+        return $this->addConditionalBranch(ConditionalBranch::fromArray($selector, $branches, $name));
     }
 
     /**
@@ -1128,6 +1188,16 @@ final class PipelineBuilder
                 continue;
             }
 
+            if ($step instanceof ConditionalBranch) {
+                $branchPayload = $this->buildConditionalBranchStepConditionsPayload($step);
+
+                if ($branchPayload !== null) {
+                    $conditions[$index] = $branchPayload;
+                }
+
+                continue;
+            }
+
             if ($step->condition === null) {
                 continue;
             }
@@ -1139,6 +1209,63 @@ final class PipelineBuilder
         }
 
         return $conditions;
+    }
+
+    /**
+     * Recursively build the branch-shape condition payload for a ConditionalBranch entry.
+     *
+     * Walks the branches map and emits one entry per branch key: null for
+     * unconditional flat StepDefinition values, the flat `{closure, negated}`
+     * shape for conditional StepDefinition values, or the nested shape for
+     * NestedPipeline values (delegating to buildNestedStepConditionsPayload()).
+     * Returns null (so the caller can omit the outer-index key from the
+     * manifest) when no branch entry carries any condition at any level
+     * — same lean-payload policy as the nested group.
+     *
+     * @param ConditionalBranch $branch The branch wrapper whose branches' conditions are walked.
+     *
+     * @return array{type: string, entries: array<string, array<string, mixed>|null>}|null The branch discriminator-tagged condition payload, or null when no branch carries any condition.
+     */
+    private function buildConditionalBranchStepConditionsPayload(ConditionalBranch $branch): ?array
+    {
+        $entries = [];
+        $hasAny = false;
+
+        foreach ($branch->branches as $key => $value) {
+            if ($value instanceof NestedPipeline) {
+                $nestedPayload = $this->buildNestedStepConditionsPayload($value);
+
+                if ($nestedPayload !== null) {
+                    $entries[$key] = $nestedPayload;
+                    $hasAny = true;
+                } else {
+                    $entries[$key] = null;
+                }
+
+                continue;
+            }
+
+            if ($value->condition === null) {
+                $entries[$key] = null;
+
+                continue;
+            }
+
+            $entries[$key] = [
+                'closure' => new SerializableClosure($value->condition),
+                'negated' => $value->conditionNegated,
+            ];
+            $hasAny = true;
+        }
+
+        if (! $hasAny) {
+            return null;
+        }
+
+        return [
+            'type' => 'branch',
+            'entries' => $entries,
+        ];
     }
 
     /**
@@ -1200,6 +1327,19 @@ final class PipelineBuilder
 
                 if ($innerNested !== null) {
                     $entries[$subIndex] = $innerNested;
+                    $hasAny = true;
+                } else {
+                    $entries[$subIndex] = null;
+                }
+
+                continue;
+            }
+
+            if ($subStep instanceof ConditionalBranch) {
+                $innerBranch = $this->buildConditionalBranchStepConditionsPayload($subStep);
+
+                if ($innerBranch !== null) {
+                    $entries[$subIndex] = $innerBranch;
                     $hasAny = true;
                 } else {
                     $entries[$subIndex] = null;
@@ -1343,10 +1483,56 @@ final class PipelineBuilder
                 continue;
             }
 
+            if ($step instanceof ConditionalBranch) {
+                $configs[$index] = self::resolveConditionalBranchStepConfigs($step, $definition);
+
+                continue;
+            }
+
             $configs[$index] = self::resolveStepConfig($step, $definition);
         }
 
         return $configs;
+    }
+
+    /**
+     * Recursively resolve the branch-shape step-configs payload for a ConditionalBranch entry.
+     *
+     * Walks the branches map and emits one config entry per branch key: a
+     * flat step config for StepDefinition branch values (resolved against
+     * the OUTER pipeline's defaults because the flat value executes at the
+     * outer branch position), or a nested shape for NestedPipeline branch
+     * values (delegating to resolveNestedStepConfigs(), which uses the
+     * INNER definition's own defaults).
+     *
+     * Flat StepDefinition branch values resolve against the OUTER
+     * PipelineDefinition's pipeline-level defaults because they execute at
+     * the outer branch position; NestedPipeline branch values delegate to
+     * their inner PipelineDefinition's own defaults.
+     *
+     * @param ConditionalBranch $branch The branch wrapper whose branches' configs are resolved.
+     * @param PipelineDefinition $definition The OUTER pipeline definition carrying pipeline-level defaults for flat branch values.
+     *
+     * @return array{type: string, configs: array<string, array<string, mixed>>} The branch discriminator-tagged configs payload.
+     */
+    private static function resolveConditionalBranchStepConfigs(ConditionalBranch $branch, PipelineDefinition $definition): array
+    {
+        $configs = [];
+
+        foreach ($branch->branches as $key => $value) {
+            if ($value instanceof NestedPipeline) {
+                $configs[$key] = self::resolveNestedStepConfigs($value);
+
+                continue;
+            }
+
+            $configs[$key] = self::resolveStepConfig($value, $definition);
+        }
+
+        return [
+            'type' => 'branch',
+            'configs' => $configs,
+        ];
     }
 
     /**
@@ -1386,6 +1572,12 @@ final class PipelineBuilder
 
             if ($subStep instanceof NestedPipeline) {
                 $innerConfigs[$subIndex] = self::resolveNestedStepConfigs($subStep);
+
+                continue;
+            }
+
+            if ($subStep instanceof ConditionalBranch) {
+                $innerConfigs[$subIndex] = self::resolveConditionalBranchStepConfigs($subStep, $nested->definition);
 
                 continue;
             }
@@ -1464,10 +1656,54 @@ final class PipelineBuilder
                 continue;
             }
 
+            if ($step instanceof ConditionalBranch) {
+                $payload[$index] = self::buildConditionalBranchStepClassesPayload($step);
+
+                continue;
+            }
+
             $payload[$index] = $step->jobClass;
         }
 
         return $payload;
+    }
+
+    /**
+     * Recursively build the branch-shape step-classes payload for a ConditionalBranch entry.
+     *
+     * Produces `['type' => 'branch', 'name' => ?string, 'selector' => SerializableClosure, 'branches' => [...]]`
+     * where each branch entry is either a class-string (for a flat
+     * StepDefinition branch value) or a nested shape (for a NestedPipeline
+     * branch value, delegated to buildNestedStepClassesPayload()).
+     *
+     * The selector closure is wrapped via SerializableClosure at payload-
+     * build time so the manifest survives the queue boundary (mirrors the
+     * condition-wrap pattern for step conditions).
+     *
+     * @param ConditionalBranch $branch The branch wrapper whose branches map is serialized.
+     *
+     * @return array{type: string, name: ?string, selector: SerializableClosure, branches: array<string, string|array<string, mixed>>} The branch discriminator-tagged shape.
+     */
+    private static function buildConditionalBranchStepClassesPayload(ConditionalBranch $branch): array
+    {
+        $branches = [];
+
+        foreach ($branch->branches as $key => $value) {
+            if ($value instanceof NestedPipeline) {
+                $branches[$key] = self::buildNestedStepClassesPayload($value);
+
+                continue;
+            }
+
+            $branches[$key] = $value->jobClass;
+        }
+
+        return [
+            'type' => 'branch',
+            'name' => $branch->name,
+            'selector' => new SerializableClosure($branch->selector),
+            'branches' => $branches,
+        ];
     }
 
     /**
@@ -1507,6 +1743,12 @@ final class PipelineBuilder
                 continue;
             }
 
+            if ($subStep instanceof ConditionalBranch) {
+                $innerSteps[$subIndex] = self::buildConditionalBranchStepClassesPayload($subStep);
+
+                continue;
+            }
+
             $innerSteps[$subIndex] = $subStep->jobClass;
         }
 
@@ -1539,7 +1781,7 @@ final class PipelineBuilder
      *
      * @return StepDefinition The last StepDefinition popped off the accumulator.
      *
-     * @throws InvalidPipelineDefinition When the accumulator is empty or the last entry is a ParallelStepGroup or NestedPipeline.
+     * @throws InvalidPipelineDefinition When the accumulator is empty or the last entry is a ParallelStepGroup, NestedPipeline, or ConditionalBranch.
      */
     private function requireLastIsStep(string $methodName): StepDefinition
     {
@@ -1564,6 +1806,14 @@ final class PipelineBuilder
 
             throw new InvalidPipelineDefinition(
                 "Cannot call {$methodName}() on a nested pipeline group. Apply {$methodName}() to individual steps inside the sub-pipeline before wrapping it via JobPipeline::nest([...]).",
+            );
+        }
+
+        if ($last instanceof ConditionalBranch) {
+            $this->steps[] = $last;
+
+            throw new InvalidPipelineDefinition(
+                "Cannot call {$methodName}() on a conditional branch. Apply {$methodName}() to individual steps inside each branch value before wrapping them via JobPipeline::branch(\$selector, [...]).",
             );
         }
 
