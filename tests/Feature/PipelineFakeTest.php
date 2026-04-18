@@ -9,6 +9,7 @@ use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
+use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderPlacedEvent;
@@ -590,5 +591,109 @@ it('Pipeline::fake()->recording() replays a parallel group sequentially through 
         TrackExecutionJobA::class,
         TrackExecutionJobB::class,
         TrackExecutionJobC::class,
+    ]);
+});
+
+// --- Story 8.2: NestedPipeline assertions -------------------------------------------------
+
+it('records a nested pipeline in the recorded definition steps array', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        FakeJobA::class,
+        JobPipeline::nest(JobPipeline::make([FakeJobB::class, FakeJobC::class]), 'child-flow'),
+    ])->send(new SimpleContext)->run();
+
+    Pipeline::assertNestedPipelineExecuted([FakeJobB::class, FakeJobC::class]);
+    Pipeline::assertNestedPipelineExecuted([FakeJobB::class, FakeJobC::class], 'child-flow');
+});
+
+it('assertNestedPipelineExecuted fails when the expected class list does not match', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        FakeJobA::class,
+        JobPipeline::nest(JobPipeline::make([FakeJobB::class])),
+    ])->send(new SimpleContext)->run();
+
+    expect(fn () => Pipeline::assertNestedPipelineExecuted([FakeJobB::class, FakeJobC::class]))
+        ->toThrow(AssertionFailedError::class, 'none of the 1 recorded nested pipeline(s) matched');
+});
+
+it('assertNestedPipelineExecuted fails with a clear message when no nested pipeline was recorded at all', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class, FakeJobB::class])->send(new SimpleContext)->run();
+
+    expect(fn () => Pipeline::assertNestedPipelineExecuted([FakeJobA::class]))
+        ->toThrow(AssertionFailedError::class, 'recorded no nested pipelines');
+});
+
+it('Pipeline::fake()->recording() replays a nested pipeline sequentially through RecordingExecutor', function (): void {
+    Pipeline::fake()->recording();
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        JobPipeline::nest(JobPipeline::make([TrackExecutionJobB::class, TrackExecutionJobC::class])),
+    ])->send(new SimpleContext)->run();
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobC::class,
+    ]);
+});
+
+it('records a conditional-branch pipeline and assertConditionalBranchExecuted matches its keys', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        FakeJobA::class,
+        Step::branch(fn ($ctx) => 'a', ['a' => FakeJobB::class, 'b' => FakeJobC::class], 'routing'),
+    ])->send(new SimpleContext)->run();
+
+    Pipeline::assertConditionalBranchExecuted(['a', 'b']);
+    Pipeline::assertConditionalBranchExecuted(['a', 'b'], 'routing');
+});
+
+it('assertConditionalBranchExecuted fails with a clear message when no branch is recorded', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class, FakeJobB::class])->send(new SimpleContext)->run();
+
+    expect(fn () => Pipeline::assertConditionalBranchExecuted(['a']))
+        ->toThrow(AssertionFailedError::class, 'recorded no conditional branches');
+});
+
+it('assertConditionalBranchExecuted fails when recorded branch keys differ from the expected keys', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        Step::branch(fn ($ctx) => 'left', ['left' => FakeJobA::class, 'right' => FakeJobB::class]),
+    ])->send(new SimpleContext)->run();
+
+    expect(fn () => Pipeline::assertConditionalBranchExecuted(['foo', 'bar']))
+        ->toThrow(AssertionFailedError::class, 'none of the 1 recorded branch group(s) matched');
+});
+
+it('Pipeline::fake()->recording() replays the selected branch through RecordingExecutor', function (): void {
+    Pipeline::fake()->recording();
+    TrackExecutionJob::$executionOrder = [];
+
+    $context = new SimpleContext;
+    $context->name = 'left';
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        Step::branch(fn (SimpleContext $ctx) => $ctx->name, [
+            'left' => TrackExecutionJobB::class,
+            'right' => TrackExecutionJobC::class,
+        ]),
+    ])->send($context)->run();
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
     ]);
 });

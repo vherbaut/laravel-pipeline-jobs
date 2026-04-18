@@ -6,11 +6,13 @@ namespace Vherbaut\LaravelPipelineJobs\Testing;
 
 use Closure;
 use Laravel\SerializableClosure\SerializableClosure;
+use Vherbaut\LaravelPipelineJobs\ConditionalBranch;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
@@ -107,6 +109,81 @@ final class FakePipelineBuilder
     public function parallel(array $jobs): static
     {
         $this->builder->parallel($jobs);
+
+        return $this;
+    }
+
+    /**
+     * Append a pre-built NestedPipeline to the fake pipeline.
+     *
+     * Delegates to the underlying PipelineBuilder so the recorded
+     * PipelineDefinition carries the nested wrapper at its outer position
+     * for assertion purposes. In Pipeline::fake() default mode the pipeline
+     * does not execute; in recording mode the RecordingExecutor replays
+     * inner steps sequentially identically to SyncExecutor.
+     *
+     * @param NestedPipeline $nested Pre-built nested pipeline wrapping an inner PipelineDefinition.
+     * @return static
+     */
+    public function addNestedPipeline(NestedPipeline $nested): static
+    {
+        $this->builder->addNestedPipeline($nested);
+
+        return $this;
+    }
+
+    /**
+     * Append a nested sub-pipeline built from a PipelineBuilder or PipelineDefinition.
+     *
+     * Fluent shorthand for addNestedPipeline(NestedPipeline::from...($pipeline, $name)).
+     *
+     * @param PipelineBuilder|PipelineDefinition $pipeline Inner pipeline to wrap; builder form is built eagerly at wrap time.
+     * @param string|null $name Optional user-visible sub-pipeline name for observability; defaults to null.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition Propagated from PipelineBuilder::build() when called with a builder that has no steps.
+     */
+    public function nest(PipelineBuilder|PipelineDefinition $pipeline, ?string $name = null): static
+    {
+        $this->builder->nest($pipeline, $name);
+
+        return $this;
+    }
+
+    /**
+     * Append a pre-built ConditionalBranch to the fake pipeline.
+     *
+     * Delegates to the underlying PipelineBuilder so the recorded
+     * PipelineDefinition carries the branch wrapper at its outer position
+     * for assertion purposes. In Pipeline::fake() default mode the pipeline
+     * does not execute; in recording mode the RecordingExecutor replays
+     * the selected branch's inner step(s) identically to SyncExecutor.
+     *
+     * @param ConditionalBranch $branch Pre-built conditional branch wrapping a selector and branch values.
+     * @return static
+     */
+    public function addConditionalBranch(ConditionalBranch $branch): static
+    {
+        $this->builder->addConditionalBranch($branch);
+
+        return $this;
+    }
+
+    /**
+     * Append a conditional branch group built from a selector closure and a branches map.
+     *
+     * Fluent shorthand for addConditionalBranch(ConditionalBranch::fromArray($selector, $branches, $name)).
+     *
+     * @param Closure $selector Selector closure typed Closure(PipelineContext): string.
+     * @param array<array-key, mixed> $branches Map of branch keys to step values (class-string, StepDefinition, NestedPipeline, PipelineBuilder, or PipelineDefinition).
+     * @param string|null $name Optional user-visible branch name for observability; defaults to null.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $branches is empty, carries a blank key, contains a ParallelStepGroup, or contains an unsupported value type.
+     */
+    public function branch(Closure $selector, array $branches, ?string $name = null): static
+    {
+        $this->builder->branch($selector, $branches, $name);
 
         return $this;
     }
@@ -671,6 +748,18 @@ final class FakePipelineBuilder
                 continue;
             }
 
+            if ($step instanceof NestedPipeline) {
+                $stepClasses[$index] = self::buildNestedStepClassesPayload($step);
+
+                continue;
+            }
+
+            if ($step instanceof ConditionalBranch) {
+                $stepClasses[$index] = self::buildConditionalBranchStepClassesPayload($step);
+
+                continue;
+            }
+
             $stepClasses[$index] = $step->jobClass;
         }
 
@@ -700,6 +789,26 @@ final class FakePipelineBuilder
                         'type' => 'parallel',
                         'entries' => $entries,
                     ];
+                }
+
+                continue;
+            }
+
+            if ($step instanceof NestedPipeline) {
+                $nestedConditions = self::buildNestedStepConditionsPayload($step);
+
+                if ($nestedConditions !== null) {
+                    $stepConditions[$index] = $nestedConditions;
+                }
+
+                continue;
+            }
+
+            if ($step instanceof ConditionalBranch) {
+                $branchConditions = self::buildConditionalBranchStepConditionsPayload($step);
+
+                if ($branchConditions !== null) {
+                    $stepConditions[$index] = $branchConditions;
                 }
 
                 continue;
@@ -813,5 +922,239 @@ final class FakePipelineBuilder
         }
 
         return $context;
+    }
+
+    /**
+     * Recursively build the nested-shape step-classes payload for a NestedPipeline entry.
+     *
+     * Mirrors PipelineBuilder::buildNestedStepClassesPayload() so the
+     * RecordingExecutor sees the same discriminator-tagged recursive shape
+     * as SyncExecutor under Pipeline::fake()->recording() (AC #14).
+     *
+     * @param NestedPipeline $nested The nested wrapper whose inner definition is walked.
+     *
+     * @return array{type: string, name: ?string, steps: array<int, string|array<string, mixed>>} The nested discriminator-tagged payload.
+     */
+    private static function buildNestedStepClassesPayload(NestedPipeline $nested): array
+    {
+        $innerSteps = [];
+
+        foreach ($nested->definition->steps as $subIndex => $subStep) {
+            if ($subStep instanceof ParallelStepGroup) {
+                $innerSteps[$subIndex] = [
+                    'type' => 'parallel',
+                    'classes' => array_map(
+                        static fn (StepDefinition $grandSubStep): string => $grandSubStep->jobClass,
+                        $subStep->steps,
+                    ),
+                ];
+
+                continue;
+            }
+
+            if ($subStep instanceof NestedPipeline) {
+                $innerSteps[$subIndex] = self::buildNestedStepClassesPayload($subStep);
+
+                continue;
+            }
+
+            if ($subStep instanceof ConditionalBranch) {
+                $innerSteps[$subIndex] = self::buildConditionalBranchStepClassesPayload($subStep);
+
+                continue;
+            }
+
+            $innerSteps[$subIndex] = $subStep->jobClass;
+        }
+
+        return [
+            'type' => 'nested',
+            'name' => $nested->name,
+            'steps' => $innerSteps,
+        ];
+    }
+
+    /**
+     * Recursively build the branch-shape step-classes payload for a ConditionalBranch entry.
+     *
+     * Mirrors PipelineBuilder::buildConditionalBranchStepClassesPayload() so
+     * the RecordingExecutor sees the same branch discriminator-tagged shape
+     * as SyncExecutor under Pipeline::fake()->recording().
+     *
+     * @param ConditionalBranch $branch The branch wrapper whose branches map is serialized.
+     *
+     * @return array{type: string, name: ?string, selector: SerializableClosure, branches: array<string, string|array<string, mixed>>} The branch discriminator-tagged shape.
+     */
+    private static function buildConditionalBranchStepClassesPayload(ConditionalBranch $branch): array
+    {
+        $branches = [];
+
+        foreach ($branch->branches as $key => $value) {
+            if ($value instanceof NestedPipeline) {
+                $branches[$key] = self::buildNestedStepClassesPayload($value);
+
+                continue;
+            }
+
+            $branches[$key] = $value->jobClass;
+        }
+
+        return [
+            'type' => 'branch',
+            'name' => $branch->name,
+            'selector' => new SerializableClosure($branch->selector),
+            'branches' => $branches,
+        ];
+    }
+
+    /**
+     * Recursively build the branch-shape condition payload for a ConditionalBranch entry.
+     *
+     * Mirrors PipelineBuilder::buildConditionalBranchStepConditionsPayload()
+     * for recording-mode parity.
+     *
+     * @param ConditionalBranch $branch The branch wrapper whose branch conditions are walked.
+     *
+     * @return array{type: string, entries: array<string, array<string, mixed>|null>}|null The branch discriminator-tagged payload, or null when no branch entry carries any condition.
+     */
+    private static function buildConditionalBranchStepConditionsPayload(ConditionalBranch $branch): ?array
+    {
+        $entries = [];
+        $hasAny = false;
+
+        foreach ($branch->branches as $key => $value) {
+            if ($value instanceof NestedPipeline) {
+                $nested = self::buildNestedStepConditionsPayload($value);
+
+                if ($nested !== null) {
+                    $entries[$key] = $nested;
+                    $hasAny = true;
+                } else {
+                    $entries[$key] = null;
+                }
+
+                continue;
+            }
+
+            if ($value->condition === null) {
+                $entries[$key] = null;
+
+                continue;
+            }
+
+            $entries[$key] = [
+                'closure' => new SerializableClosure($value->condition),
+                'negated' => $value->conditionNegated,
+            ];
+            $hasAny = true;
+        }
+
+        if (! $hasAny) {
+            return null;
+        }
+
+        return [
+            'type' => 'branch',
+            'entries' => $entries,
+        ];
+    }
+
+    /**
+     * Recursively build the nested-shape condition payload for a NestedPipeline entry.
+     *
+     * Mirrors PipelineBuilder::buildNestedStepConditionsPayload() so
+     * RecordingExecutor evaluates inner conditions correctly in recording
+     * mode. Returns null when the nested group carries no conditions at any
+     * level so the outer code can omit the entry from the manifest for a
+     * leaner payload (matches the parallel-group lean-payload precedent).
+     *
+     * @param NestedPipeline $nested The nested wrapper whose inner definition's conditions are walked.
+     *
+     * @return array{type: string, entries: array<int, array<string, mixed>|null>}|null The nested discriminator-tagged payload, or null when none of the inner entries carry a condition.
+     */
+    private static function buildNestedStepConditionsPayload(NestedPipeline $nested): ?array
+    {
+        $entries = [];
+        $hasAny = false;
+
+        foreach ($nested->definition->steps as $subIndex => $subStep) {
+            if ($subStep instanceof ParallelStepGroup) {
+                $parallelEntries = [];
+                $parallelHasAny = false;
+
+                foreach ($subStep->steps as $grandSubIndex => $grandSubStep) {
+                    if ($grandSubStep->condition === null) {
+                        $parallelEntries[$grandSubIndex] = null;
+
+                        continue;
+                    }
+
+                    $parallelEntries[$grandSubIndex] = [
+                        'closure' => new SerializableClosure($grandSubStep->condition),
+                        'negated' => $grandSubStep->conditionNegated,
+                    ];
+                    $parallelHasAny = true;
+                }
+
+                if ($parallelHasAny) {
+                    $entries[$subIndex] = [
+                        'type' => 'parallel',
+                        'entries' => $parallelEntries,
+                    ];
+                    $hasAny = true;
+                } else {
+                    $entries[$subIndex] = null;
+                }
+
+                continue;
+            }
+
+            if ($subStep instanceof NestedPipeline) {
+                $innerNested = self::buildNestedStepConditionsPayload($subStep);
+
+                if ($innerNested !== null) {
+                    $entries[$subIndex] = $innerNested;
+                    $hasAny = true;
+                } else {
+                    $entries[$subIndex] = null;
+                }
+
+                continue;
+            }
+
+            if ($subStep instanceof ConditionalBranch) {
+                $innerBranch = self::buildConditionalBranchStepConditionsPayload($subStep);
+
+                if ($innerBranch !== null) {
+                    $entries[$subIndex] = $innerBranch;
+                    $hasAny = true;
+                } else {
+                    $entries[$subIndex] = null;
+                }
+
+                continue;
+            }
+
+            if ($subStep->condition === null) {
+                $entries[$subIndex] = null;
+
+                continue;
+            }
+
+            $entries[$subIndex] = [
+                'closure' => new SerializableClosure($subStep->condition),
+                'negated' => $subStep->conditionNegated,
+            ];
+            $hasAny = true;
+        }
+
+        if (! $hasAny) {
+            return null;
+        }
+
+        return [
+            'type' => 'nested',
+            'entries' => $entries,
+        ];
     }
 }

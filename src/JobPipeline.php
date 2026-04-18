@@ -76,6 +76,87 @@ final class JobPipeline
     }
 
     /**
+     * Wrap a pipeline as a nested sub-pipeline for inline use inside another pipeline definition.
+     *
+     * Usage: `Pipeline::make([A::class, JobPipeline::nest($subPipeline), D::class])`.
+     * Accepts either a PipelineBuilder (snapshotted eagerly via ->build())
+     * or a pre-built PipelineDefinition. The returned NestedPipeline slots
+     * into the outer pipeline's $steps array as a single logical position;
+     * inner steps execute sequentially with a shared PipelineContext and
+     * their completed class names flatten onto the outer $completedSteps
+     * list so saga compensation operates over one merged reverse-order chain.
+     *
+     * This is a VALUE CONSTRUCTOR, not an execution verb: the resulting
+     * wrapper is consumed by PipelineBuilder / JobPipeline::make() and does
+     * not itself trigger dispatch. For fluent-builder usage prefer
+     * PipelineBuilder::nest() (same arguments, identical semantics).
+     *
+     * @param PipelineBuilder|PipelineDefinition $pipeline Inner pipeline to wrap; builder form is built eagerly at wrap time.
+     * @param string|null $name Optional user-visible sub-pipeline name for observability; defaults to null.
+     *
+     * @return NestedPipeline A value object wrapping the inner pipeline as a single outer position.
+     *
+     * @throws InvalidPipelineDefinition Propagated from PipelineBuilder::build() when called with a builder that has no steps.
+     */
+    public static function nest(PipelineBuilder|PipelineDefinition $pipeline, ?string $name = null): NestedPipeline
+    {
+        if ($pipeline instanceof PipelineBuilder) {
+            return NestedPipeline::fromBuilder($pipeline, $name);
+        }
+
+        return NestedPipeline::fromDefinition($pipeline, $name);
+    }
+
+    /**
+     * Build a conditional branch group for inline use inside a pipeline definition.
+     *
+     * Usage: `Pipeline::make([A::class, JobPipeline::branch(fn ($ctx) => $ctx->type, ['premium' => Premium::class, 'standard' => Standard::class]), D::class])`.
+     * The returned ConditionalBranch slots into the outer pipeline's $steps
+     * array as a single logical position; at execution time the selector is
+     * evaluated once against the live PipelineContext and the matching branch
+     * value executes in place of the branch position. After completion,
+     * execution converges back to the next outer step (FR26, FR27).
+     *
+     * Branch values may be class-strings, pre-built StepDefinition
+     * instances, NestedPipeline instances, PipelineBuilder instances
+     * (auto-wrapped into NestedPipeline), or PipelineDefinition instances
+     * (auto-wrapped). ParallelStepGroup values are rejected at factory time;
+     * embedding a ConditionalBranch inside a ParallelStepGroup is likewise
+     * rejected at build time.
+     *
+     * This is a VALUE CONSTRUCTOR, not an execution verb: the resulting
+     * wrapper is consumed by PipelineBuilder / JobPipeline::make() and does
+     * not itself trigger dispatch. For fluent-builder usage prefer
+     * PipelineBuilder::branch() (same arguments, identical semantics).
+     *
+     * In queued mode the selector closure is wrapped via SerializableClosure
+     * so it survives the queue boundary. Selectors capturing $this from a
+     * non-serializable enclosing class (or referencing non-serializable
+     * values via `use(...)`) will fail at enqueue time; prefer static
+     * selectors or capture only serializable values.
+     *
+     * WARNING: when two branches declare the SAME job class with DIFFERENT
+     * compensation classes, the saga `compensationMapping` resolves via
+     * `array_merge` later-wins: the LAST-declared branch's compensation is
+     * registered under that class name. If the FIRST-declared branch runs
+     * and fails under StopAndCompensate, the compensation for the LAST
+     * branch is invoked instead. Prefer unique job classes per branch, or
+     * accept the documented semantic.
+     *
+     * @param Closure $selector Selector closure typed Closure(PipelineContext): string.
+     * @param array<array-key, mixed> $branches Map of branch keys to step values (class-string, StepDefinition, NestedPipeline, PipelineBuilder, or PipelineDefinition).
+     * @param string|null $name Optional user-visible branch name for observability; defaults to null.
+     *
+     * @return ConditionalBranch A value object wrapping the branches for conditional execution.
+     *
+     * @throws InvalidPipelineDefinition When $branches is empty, carries a blank key, contains a ParallelStepGroup, or contains an unsupported value type.
+     */
+    public static function branch(Closure $selector, array $branches, ?string $name = null): ConditionalBranch
+    {
+        return ConditionalBranch::fromArray($selector, $branches, $name);
+    }
+
+    /**
      * Register a pipeline as a Laravel event listener in a single call.
      *
      * Equivalent to: make($jobs)->send($send)->toListener() + Event::listen($eventClass, $listener).

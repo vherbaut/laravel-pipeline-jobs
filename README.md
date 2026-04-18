@@ -52,6 +52,7 @@ Key features at a glance:
 - **Conditional steps.** `when()` / `unless()` predicates evaluated against the live context.
 - **Lifecycle hooks and observability.** Six hooks (per-step and pipeline-level) for logging, metrics, and alerting.
 - **Event listener bridge.** One line to register a pipeline as a listener.
+- **Parallel execution and branching.** Fan out / fan in groups (`JobPipeline::parallel`), nested sub pipelines (`JobPipeline::nest`), conditional branches (`Step::branch`).
 - **Comprehensive testing toolkit.** `Pipeline::fake()`, recording mode, context snapshots, compensation assertions.
 
 ## Requirements
@@ -68,6 +69,17 @@ composer require vherbaut/laravel-pipeline-jobs
 ```
 
 The package auto discovers its service provider and facade. No manual registration is needed.
+
+### Optional: enable parallel step groups
+
+Parallel step groups (`JobPipeline::parallel([...])`) fan out each sub step through Laravel's `Bus::batch()`, which requires the `job_batches` table. If you plan to use parallel groups on queued pipelines, run Laravel's built in command once to publish and apply the migration:
+
+```bash
+php artisan queue:batches-table
+php artisan migrate
+```
+
+You can skip this step if you never dispatch parallel groups, or if you only run them synchronously (sync pipelines do not touch `Bus::batch()`).
 
 ## Quick Start
 
@@ -140,6 +152,9 @@ English documentation lives under [`docs/en/`](docs/en/). French documentation l
 | Lifecycle Hooks | Per-step hooks (`beforeEach`, `afterEach`, `onStepFailed`) and pipeline-level callbacks (`onSuccess`, `onFailure(Closure)`, `onComplete`). | [docs/en/lifecycle-hooks.md](docs/en/lifecycle-hooks.md) |
 | Per-Step Configuration | Route each step to its own queue or connection, override sync execution, set retry, backoff, and timeout policies per step, with pipeline-level defaults. | [docs/en/per-step-configuration.md](docs/en/per-step-configuration.md) |
 | Dispatch Verb | Execute a pipeline with `Pipeline::dispatch([...])` as a Bus::dispatch-style alternative to `->make()->run()`. Auto-runs on destruct. | [docs/en/dispatch-verb.md](docs/en/dispatch-verb.md) |
+| Parallel Step Groups | Fan out / fan in groups via `JobPipeline::parallel([...])`, `Bus::batch()` dispatch on the queue, context merging, nesting constraints. | [docs/en/parallel-steps.md](docs/en/parallel-steps.md) |
+| Pipeline Nesting | Reuse sub pipelines via `JobPipeline::nest(...)`, nested cursor for queued mode, outer FailStrategy inheritance, inner defaults governance. | [docs/en/pipeline-nesting.md](docs/en/pipeline-nesting.md) |
+| Conditional Branching | Pick a branch at runtime via `Step::branch($selector, [...])`, accepted branch values (class string, StepDefinition, sub pipeline), convergence on the next outer step. | [docs/en/conditional-branching.md](docs/en/conditional-branching.md) |
 | Testing | `Pipeline::fake()`, recording mode, step and context assertions, compensation assertions. | [docs/en/testing.md](docs/en/testing.md) |
 | API Reference | Complete catalog of public symbols, methods, properties, exceptions, and events. | [docs/en/api-reference.md](docs/en/api-reference.md) |
 
@@ -147,9 +162,9 @@ English documentation lives under [`docs/en/`](docs/en/). French documentation l
 
 The following features are planned for future releases. The properties are already reserved in the codebase:
 
-- **Named pipelines.** `name('order-fulfillment')` for better observability and logging.
-- **Parallel steps.** Fan out pattern for steps that can execute concurrently.
+- **Top level named pipelines.** A `name('order-fulfillment')` to tag the whole pipeline (parallel groups, sub pipelines, and branches already expose an optional `name`).
 - **Pipeline events.** Dispatch Laravel events at key lifecycle points.
+- **Rate limiting and concurrency.** Integration with Laravel's rate limiter to bound per step load.
 
 ## Contributing
 

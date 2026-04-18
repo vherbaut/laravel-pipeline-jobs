@@ -6,7 +6,9 @@ namespace Vherbaut\LaravelPipelineJobs\Testing;
 
 use Closure;
 use PHPUnit\Framework\Assert as PHPUnit;
+use Vherbaut\LaravelPipelineJobs\ConditionalBranch;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -223,6 +225,193 @@ trait PipelineAssertions
                 array_keys($actualGroups),
             )),
         ));
+    }
+
+    /**
+     * Assert that a recorded pipeline contains a nested group matching the expected inner-step class list.
+     *
+     * Walks the resolved pipeline's `$definition->steps`, locates any
+     * NestedPipeline wrapper whose flattened inner-step class names
+     * (recursive across parallel AND nested sub-groups) match the expected
+     * list in declaration order, and optionally filters by the wrapper's
+     * `$name` slot when `$name !== null`. Fails with a listing of the
+     * recorded nested groups when no match is found. When no nested group
+     * has been recorded at all, fails with a clear "no nested group
+     * recorded" message.
+     *
+     * Available in default Pipeline::fake() mode and in recording mode
+     * (does NOT require recording mode — the assertion inspects the
+     * recorded definition, not execution traces).
+     *
+     * @param array<int, string> $expectedStepClasses Inner-step class-strings in expected declaration order (recursive flatten across parallel and nested sub-groups).
+     * @param string|null $name Optional nested-pipeline name to match; null matches any name.
+     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
+     * @return void
+     */
+    public function assertNestedPipelineExecuted(array $expectedStepClasses, ?string $name = null, ?int $pipelineIndex = null): void
+    {
+        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
+
+        $actualGroups = [];
+
+        foreach ($recorded->definition->steps as $step) {
+            if (! $step instanceof NestedPipeline) {
+                continue;
+            }
+
+            if ($name !== null && $step->name !== $name) {
+                continue;
+            }
+
+            $flattened = $this->flattenNestedDefinitionSteps($step->definition);
+
+            $actualGroups[] = ['name' => $step->name, 'classes' => $flattened];
+
+            if ($flattened === $expectedStepClasses) {
+                return;
+            }
+        }
+
+        $nameSuffix = $name !== null ? sprintf(' with name "%s"', $name) : '';
+        $expectedLabel = implode(', ', array_map(static fn (string $class): string => class_basename($class), $expectedStepClasses));
+
+        if ($actualGroups === []) {
+            PHPUnit::fail(sprintf(
+                'Expected a recorded nested pipeline%s with inner steps [%s], but the resolved pipeline recorded no nested pipelines.',
+                $nameSuffix,
+                $expectedLabel,
+            ));
+        }
+
+        PHPUnit::fail(sprintf(
+            "Expected a recorded nested pipeline%s with inner steps [%s], but none of the %d recorded nested pipeline(s) matched.\n\nRecorded nested pipelines:\n%s",
+            $nameSuffix,
+            $expectedLabel,
+            count($actualGroups),
+            implode("\n", array_map(
+                static fn (array $group, int $index): string => sprintf(
+                    '  %d. (name: %s) [%s]',
+                    $index + 1,
+                    $group['name'] ?? '<null>',
+                    implode(', ', array_map(static fn (string $class): string => class_basename($class), $group['classes'])),
+                ),
+                $actualGroups,
+                array_keys($actualGroups),
+            )),
+        ));
+    }
+
+    /**
+     * Assert that a recorded pipeline contains a conditional branch group matching the expected branch keys.
+     *
+     * Walks the resolved pipeline's `$definition->steps`, locates any
+     * ConditionalBranch wrapper whose declared branch keys match
+     * `$expectedKeys` exactly (order-sensitive since PHP arrays preserve
+     * insertion order), and optionally filters by the wrapper's `$name`
+     * slot when `$name !== null`. Fails with a listing of the recorded
+     * branch groups when no match is found. When no branch group was
+     * recorded at all, fails with a clear "no conditional branches
+     * recorded" message.
+     *
+     * Available in default Pipeline::fake() mode and in recording mode
+     * (does NOT require recording mode — the assertion inspects the
+     * recorded definition, not execution traces).
+     *
+     * @param array<int, string> $expectedKeys Branch keys in expected declaration order.
+     * @param string|null $name Optional branch group name to match; null matches any name.
+     * @param int|null $pipelineIndex 0-based index, or null for the most recent pipeline.
+     * @return void
+     */
+    public function assertConditionalBranchExecuted(array $expectedKeys, ?string $name = null, ?int $pipelineIndex = null): void
+    {
+        $recorded = $this->resolveRecordedPipeline($pipelineIndex);
+
+        $actualGroups = [];
+
+        foreach ($recorded->definition->steps as $step) {
+            if (! $step instanceof ConditionalBranch) {
+                continue;
+            }
+
+            if ($name !== null && $step->name !== $name) {
+                continue;
+            }
+
+            $keys = array_keys($step->branches);
+
+            $actualGroups[] = ['name' => $step->name, 'keys' => $keys];
+
+            if ($keys === $expectedKeys) {
+                return;
+            }
+        }
+
+        $nameSuffix = $name !== null ? sprintf(' with name "%s"', $name) : '';
+        $expectedLabel = implode(', ', array_map(static fn (string $key): string => '"'.$key.'"', $expectedKeys));
+
+        if ($actualGroups === []) {
+            PHPUnit::fail(sprintf(
+                'Expected a recorded conditional branch%s with keys [%s], but the resolved pipeline recorded no conditional branches.',
+                $nameSuffix,
+                $expectedLabel,
+            ));
+        }
+
+        PHPUnit::fail(sprintf(
+            "Expected a recorded conditional branch%s with keys [%s], but none of the %d recorded branch group(s) matched.\n\nRecorded conditional branches:\n%s",
+            $nameSuffix,
+            $expectedLabel,
+            count($actualGroups),
+            implode("\n", array_map(
+                static fn (array $group, int $index): string => sprintf(
+                    '  %d. (name: %s) [%s]',
+                    $index + 1,
+                    $group['name'] ?? '<null>',
+                    implode(', ', array_map(static fn (string $key): string => '"'.$key.'"', $group['keys'])),
+                ),
+                $actualGroups,
+                array_keys($actualGroups),
+            )),
+        ));
+    }
+
+    /**
+     * Recursively flatten a nested pipeline's inner steps to a flat class-name list.
+     *
+     * Used by assertNestedPipelineExecuted() to match the expected flat
+     * list against the recorded nested tree. Parallel sub-groups expand to
+     * their sub-steps' class names in declaration order; NestedPipeline
+     * sub-entries recurse through this helper transitively.
+     *
+     * @param PipelineDefinition $definition The inner pipeline definition whose steps are flattened.
+     *
+     * @return array<int, string> Flat class-name list in declaration order.
+     */
+    private function flattenNestedDefinitionSteps(PipelineDefinition $definition): array
+    {
+        $flat = [];
+
+        foreach ($definition->steps as $inner) {
+            if ($inner instanceof ParallelStepGroup) {
+                foreach ($inner->steps as $subStep) {
+                    $flat[] = $subStep->jobClass;
+                }
+
+                continue;
+            }
+
+            if ($inner instanceof NestedPipeline) {
+                foreach ($this->flattenNestedDefinitionSteps($inner->definition) as $deeper) {
+                    $flat[] = $deeper;
+                }
+
+                continue;
+            }
+
+            $flat[] = $inner->jobClass;
+        }
+
+        return $flat;
     }
 
     /**
