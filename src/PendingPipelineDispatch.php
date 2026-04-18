@@ -235,6 +235,73 @@ class PendingPipelineDispatch
     }
 
     /**
+     * Proxies PipelineBuilder::addNestedPipeline() and returns the wrapper for chainability.
+     *
+     * Append a pre-built NestedPipeline to the pipeline.
+     *
+     * @param NestedPipeline $nested Pre-built nested pipeline wrapping an inner PipelineDefinition.
+     * @return static
+     */
+    public function addNestedPipeline(NestedPipeline $nested): static
+    {
+        $this->builder->addNestedPipeline($nested);
+
+        return $this;
+    }
+
+    /**
+     * Proxies PipelineBuilder::nest() and returns the wrapper for chainability.
+     *
+     * Append a nested sub-pipeline built from a PipelineBuilder or PipelineDefinition.
+     *
+     * @param PipelineBuilder|PipelineDefinition $pipeline Inner pipeline to wrap; builder form is built eagerly at wrap time.
+     * @param string|null $name Optional user-visible sub-pipeline name for observability; defaults to null.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition Propagated from PipelineBuilder::build() when called with a builder that has no steps.
+     */
+    public function nest(PipelineBuilder|PipelineDefinition $pipeline, ?string $name = null): static
+    {
+        $this->builder->nest($pipeline, $name);
+
+        return $this;
+    }
+
+    /**
+     * Proxies PipelineBuilder::addConditionalBranch() and returns the wrapper for chainability.
+     *
+     * Append a pre-built ConditionalBranch to the pipeline.
+     *
+     * @param ConditionalBranch $branch Pre-built conditional branch wrapping a selector and branch values.
+     * @return static
+     */
+    public function addConditionalBranch(ConditionalBranch $branch): static
+    {
+        $this->builder->addConditionalBranch($branch);
+
+        return $this;
+    }
+
+    /**
+     * Proxies PipelineBuilder::branch() and returns the wrapper for chainability.
+     *
+     * Append a conditional branch group built from a selector closure and a branches map.
+     *
+     * @param Closure $selector Selector closure typed Closure(PipelineContext): string.
+     * @param array<array-key, mixed> $branches Map of branch keys to step values (class-string, StepDefinition, NestedPipeline, PipelineBuilder, or PipelineDefinition).
+     * @param string|null $name Optional user-visible branch name for observability; defaults to null.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $branches is empty, carries a blank key, contains a ParallelStepGroup, or contains an unsupported value type.
+     */
+    public function branch(Closure $selector, array $branches, ?string $name = null): static
+    {
+        $this->builder->branch($selector, $branches, $name);
+
+        return $this;
+    }
+
+    /**
      * Proxies PipelineBuilder::when() and returns the wrapper for chainability.
      *
      * Append a step that only runs when the condition evaluates to true.

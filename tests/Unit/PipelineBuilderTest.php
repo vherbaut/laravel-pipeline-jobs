@@ -2,9 +2,13 @@
 
 declare(strict_types=1);
 
+use Laravel\SerializableClosure\SerializableClosure;
+use Vherbaut\LaravelPipelineJobs\ConditionalBranch;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\JobPipeline;
+use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
@@ -337,7 +341,7 @@ it('accepts a mixed array of strings and StepDefinition instances in the constru
 
 it('rejects non-string non-StepDefinition items in the constructor array', function () {
     expect(fn () => new PipelineBuilder([FakeJobA::class, 42, FakeJobC::class]))
-        ->toThrow(InvalidPipelineDefinition::class, 'must be class-string, StepDefinition, or ParallelStepGroup');
+        ->toThrow(InvalidPipelineDefinition::class, 'must be class-string, StepDefinition, ParallelStepGroup, NestedPipeline, or ConditionalBranch');
 });
 
 // --- return() ---
@@ -1069,4 +1073,329 @@ it('resolveStepConfigs produces the nested parallel shape for a group with per-s
         ->and($configs[1]['configs'])->toHaveCount(2)
         ->and($configs[1]['configs'][0]['queue'])->toBe('fast')
         ->and($configs[1]['configs'][1]['retry'])->toBe(3);
+});
+
+// --- Story 8.2: NestedPipeline integration -------------------------------------------------
+
+it('accepts a NestedPipeline instance in the constructor array', function (): void {
+    $nested = NestedPipeline::fromBuilder(JobPipeline::make([FakeJobA::class, FakeJobB::class]));
+
+    $definition = (new PipelineBuilder([FakeJobC::class, $nested]))->build();
+
+    expect($definition->steps[0])->toBeInstanceOf(StepDefinition::class)
+        ->and($definition->steps[1])->toBe($nested);
+});
+
+it('auto-wraps a bare PipelineBuilder entry into a NestedPipeline', function (): void {
+    $child = JobPipeline::make([FakeJobA::class]);
+
+    $definition = (new PipelineBuilder([FakeJobB::class, $child]))->build();
+
+    expect($definition->steps[1])->toBeInstanceOf(NestedPipeline::class);
+    /** @var NestedPipeline $wrapped */
+    $wrapped = $definition->steps[1];
+    expect($wrapped->name)->toBeNull()
+        ->and($wrapped->definition->stepCount())->toBe(1);
+});
+
+it('auto-wraps a bare PipelineDefinition entry into a NestedPipeline', function (): void {
+    $inner = JobPipeline::make([FakeJobA::class, FakeJobB::class])->build();
+
+    $definition = (new PipelineBuilder([FakeJobC::class, $inner]))->build();
+
+    expect($definition->steps[1])->toBeInstanceOf(NestedPipeline::class);
+    /** @var NestedPipeline $wrapped */
+    $wrapped = $definition->steps[1];
+    expect($wrapped->definition)->toBe($inner);
+});
+
+it('provides the fluent nest() and addNestedPipeline() helpers symmetric with parallel()', function (): void {
+    $nested = NestedPipeline::fromBuilder(JobPipeline::make([FakeJobB::class]));
+
+    $definition = JobPipeline::make([FakeJobA::class])
+        ->addNestedPipeline($nested)
+        ->nest(JobPipeline::make([FakeJobC::class]), 'fluent-nest')
+        ->build();
+
+    expect($definition->stepCount())->toBe(3);
+
+    /** @var NestedPipeline $secondPosition */
+    $secondPosition = $definition->steps[1];
+    /** @var NestedPipeline $thirdPosition */
+    $thirdPosition = $definition->steps[2];
+
+    expect($secondPosition)->toBe($nested)
+        ->and($thirdPosition)->toBeInstanceOf(NestedPipeline::class)
+        ->and($thirdPosition->name)->toBe('fluent-nest');
+});
+
+dataset('per_step_mutators_rejected_on_nested_pipeline', [
+    'compensateWith' => [fn (PipelineBuilder $b) => $b->compensateWith(FakeJobB::class)],
+    'onQueue' => [fn (PipelineBuilder $b) => $b->onQueue('nested-queue')],
+    'onConnection' => [fn (PipelineBuilder $b) => $b->onConnection('redis')],
+    'sync' => [fn (PipelineBuilder $b) => $b->sync()],
+    'retry' => [fn (PipelineBuilder $b) => $b->retry(3)],
+    'backoff' => [fn (PipelineBuilder $b) => $b->backoff(2)],
+    'timeout' => [fn (PipelineBuilder $b) => $b->timeout(30)],
+]);
+
+it('rejects per-step mutators chained immediately after nest() with a targeted error', function (Closure $mutator): void {
+    $builder = JobPipeline::make([FakeJobA::class])
+        ->nest(JobPipeline::make([FakeJobB::class]));
+
+    expect(fn () => $mutator($builder))
+        ->toThrow(InvalidPipelineDefinition::class, 'Cannot call ');
+})->with('per_step_mutators_rejected_on_nested_pipeline');
+
+it('preserves builder state after a mutator-on-nested rejection (popped group is restored)', function (): void {
+    $builder = JobPipeline::make([FakeJobA::class])->nest(JobPipeline::make([FakeJobB::class]));
+
+    try {
+        $builder->onQueue('nested-queue');
+    } catch (InvalidPipelineDefinition) {
+        // expected — now verify the builder still carries the nested position.
+    }
+
+    $definition = $builder->build();
+    expect($definition->stepCount())->toBe(2)
+        ->and($definition->steps[1])->toBeInstanceOf(NestedPipeline::class);
+});
+
+it('buildStepClassesPayload produces the nested-shape for a NestedPipeline position', function (): void {
+    $nested = NestedPipeline::fromBuilder(
+        JobPipeline::make([FakeJobB::class, FakeJobC::class]),
+        'snapshot-flow',
+    );
+
+    $definition = (new PipelineBuilder([FakeJobA::class, $nested]))->build();
+
+    // Trigger payload building indirectly by constructing a manifest through
+    // the builder's toListener / run path: we introspect the stepClasses
+    // stored on the manifest via the public static helper.
+    $listener = JobPipeline::make([FakeJobA::class, $nested])->toListener();
+
+    // The listener closure captures the computed stepClasses internally; we
+    // re-derive via resolveStepConfigs which shares the same traversal.
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0])->toBeArray()
+        ->and(isset($configs[0]['type']))->toBeFalse()
+        ->and($configs[1]['type'])->toBe('nested')
+        ->and($configs[1]['configs'])->toHaveCount(2)
+        ->and($listener)->toBeInstanceOf(Closure::class);
+});
+
+it('resolveStepConfigs emits the nested-shape with inner-pipeline defaults governing inner sub-steps', function (): void {
+    // Inner pipeline with its own defaultRetry.
+    $inner = JobPipeline::make([FakeJobB::class, FakeJobC::class])->defaultRetry(5);
+    $nested = NestedPipeline::fromBuilder($inner);
+
+    // Outer pipeline has a different defaultRetry that must NOT cascade into inner.
+    $definition = JobPipeline::make([FakeJobA::class, $nested])
+        ->defaultRetry(1)
+        ->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0]['retry'])->toBe(1)
+        ->and($configs[1]['type'])->toBe('nested')
+        ->and($configs[1]['configs'][0]['retry'])->toBe(5)
+        ->and($configs[1]['configs'][1]['retry'])->toBe(5);
+});
+
+it('resolveStepConfigs handles nested-inside-nested recursion', function (): void {
+    $innermost = JobPipeline::make([FakeJobC::class])->defaultRetry(7);
+    $middle = JobPipeline::make([FakeJobB::class])->nest($innermost);
+    $nested = NestedPipeline::fromBuilder($middle);
+
+    $definition = JobPipeline::make([FakeJobA::class, $nested])->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[1]['type'])->toBe('nested')
+        ->and($configs[1]['configs'][1]['type'])->toBe('nested')
+        ->and($configs[1]['configs'][1]['configs'][0]['retry'])->toBe(7);
+});
+
+it('resolveStepConfigs handles parallel-inside-nested recursion', function (): void {
+    $inner = JobPipeline::make([FakeJobB::class])->parallel([FakeJobA::class, FakeJobC::class]);
+    $nested = NestedPipeline::fromBuilder($inner);
+
+    $definition = JobPipeline::make([$nested])->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[0]['type'])->toBe('nested')
+        ->and($configs[0]['configs'][1]['type'])->toBe('parallel')
+        ->and($configs[0]['configs'][1]['configs'])->toHaveCount(2);
+});
+
+it('accepts a ConditionalBranch in the constructor array', function (): void {
+    $branch = ConditionalBranch::fromArray(fn ($ctx) => 'a', ['a' => FakeJobB::class, 'b' => FakeJobC::class]);
+
+    $definition = (new PipelineBuilder([FakeJobA::class, $branch]))->build();
+
+    expect($definition->stepCount())->toBe(2)
+        ->and($definition->steps[1])->toBe($branch);
+});
+
+it('fluent branch() appends a ConditionalBranch to the pipeline', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->branch(fn ($ctx) => 'a', ['a' => FakeJobB::class, 'b' => FakeJobC::class], 'routing')
+        ->build();
+
+    expect($definition->steps[1])->toBeInstanceOf(ConditionalBranch::class)
+        ->and($definition->steps[1]->name)->toBe('routing');
+});
+
+it('addConditionalBranch() appends a pre-built ConditionalBranch', function (): void {
+    $branch = ConditionalBranch::fromArray(fn ($ctx) => 'a', ['a' => FakeJobB::class]);
+    $definition = (new PipelineBuilder([FakeJobA::class]))->addConditionalBranch($branch)->build();
+
+    expect($definition->steps[1])->toBe($branch);
+});
+
+it('rejects compensateWith() when the last step is a ConditionalBranch', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->branch(fn ($ctx) => 'a', ['a' => FakeJobB::class]);
+
+    expect(fn () => $builder->compensateWith('App\\Jobs\\Compensate'))
+        ->toThrow(InvalidPipelineDefinition::class, 'compensateWith() on a conditional branch');
+});
+
+it('rejects onQueue() when the last step is a ConditionalBranch', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->branch(fn ($ctx) => 'a', ['a' => FakeJobB::class]);
+
+    expect(fn () => $builder->onQueue('fast'))
+        ->toThrow(InvalidPipelineDefinition::class, 'onQueue() on a conditional branch');
+});
+
+it('rejects onConnection() when the last step is a ConditionalBranch', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->branch(fn ($ctx) => 'a', ['a' => FakeJobB::class]);
+
+    expect(fn () => $builder->onConnection('redis'))
+        ->toThrow(InvalidPipelineDefinition::class, 'onConnection() on a conditional branch');
+});
+
+it('rejects sync() when the last step is a ConditionalBranch', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->branch(fn ($ctx) => 'a', ['a' => FakeJobB::class]);
+
+    expect(fn () => $builder->sync())
+        ->toThrow(InvalidPipelineDefinition::class, 'sync() on a conditional branch');
+});
+
+it('rejects retry() when the last step is a ConditionalBranch', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->branch(fn ($ctx) => 'a', ['a' => FakeJobB::class]);
+
+    expect(fn () => $builder->retry(3))
+        ->toThrow(InvalidPipelineDefinition::class, 'retry() on a conditional branch');
+});
+
+it('rejects backoff() when the last step is a ConditionalBranch', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->branch(fn ($ctx) => 'a', ['a' => FakeJobB::class]);
+
+    expect(fn () => $builder->backoff(5))
+        ->toThrow(InvalidPipelineDefinition::class, 'backoff() on a conditional branch');
+});
+
+it('rejects timeout() when the last step is a ConditionalBranch', function (): void {
+    $builder = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->branch(fn ($ctx) => 'a', ['a' => FakeJobB::class]);
+
+    expect(fn () => $builder->timeout(60))
+        ->toThrow(InvalidPipelineDefinition::class, 'timeout() on a conditional branch');
+});
+
+it('buildStepClassesPayload produces the branch shape for a ConditionalBranch position', function (): void {
+    $definition = JobPipeline::make([
+        FakeJobA::class,
+        Step::branch(
+            fn ($ctx) => 'a',
+            [
+                'a' => FakeJobB::class,
+                'b' => JobPipeline::make([FakeJobA::class, FakeJobC::class]),
+            ],
+            'picker',
+        ),
+    ])->build();
+
+    $reflection = new ReflectionClass(PipelineBuilder::class);
+    $method = $reflection->getMethod('buildStepClassesPayload');
+    $method->setAccessible(true);
+    $payload = $method->invoke(null, $definition);
+
+    expect($payload[0])->toBe(FakeJobA::class)
+        ->and($payload[1]['type'])->toBe('branch')
+        ->and($payload[1]['name'])->toBe('picker')
+        ->and($payload[1]['selector'])->toBeInstanceOf(SerializableClosure::class)
+        ->and($payload[1]['branches']['a'])->toBe(FakeJobB::class)
+        ->and($payload[1]['branches']['b']['type'])->toBe('nested')
+        ->and($payload[1]['branches']['b']['steps'])->toHaveCount(2);
+});
+
+it('buildStepConditions emits the branch shape when at least one branch value is conditional', function (): void {
+    $builder = new PipelineBuilder([
+        FakeJobA::class,
+        Step::branch(
+            fn ($ctx) => 'a',
+            [
+                'a' => Step::when(fn ($ctx) => true, FakeJobB::class),
+                'b' => FakeJobC::class,
+            ],
+        ),
+    ]);
+
+    $definition = $builder->build();
+
+    $reflection = new ReflectionClass(PipelineBuilder::class);
+    $method = $reflection->getMethod('buildStepConditions');
+    $method->setAccessible(true);
+    $conditions = $method->invoke($builder, $definition);
+
+    expect($conditions)->toHaveKey(1)
+        ->and($conditions[1]['type'])->toBe('branch')
+        ->and($conditions[1]['entries']['a'])->toBeArray()
+        ->and($conditions[1]['entries']['a']['negated'])->toBeFalse()
+        ->and($conditions[1]['entries']['b'])->toBeNull();
+});
+
+it('resolveStepConfigs produces the branch shape with outer defaults for flat branch values', function (): void {
+    $definition = JobPipeline::make([
+        FakeJobA::class,
+        Step::branch(fn ($ctx) => 'a', ['a' => FakeJobB::class, 'b' => FakeJobC::class]),
+    ])->defaultRetry(4)->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[1]['type'])->toBe('branch')
+        ->and($configs[1]['configs']['a']['retry'])->toBe(4)
+        ->and($configs[1]['configs']['b']['retry'])->toBe(4);
+});
+
+it('resolveStepConfigs produces the branch shape delegating nested branch values to their inner defaults', function (): void {
+    $innerBuilder = JobPipeline::make([FakeJobC::class])->defaultRetry(9);
+
+    $definition = JobPipeline::make([
+        FakeJobA::class,
+        Step::branch(fn ($ctx) => 'flat', ['flat' => FakeJobB::class, 'nested' => $innerBuilder]),
+    ])->defaultRetry(1)->build();
+
+    $configs = PipelineBuilder::resolveStepConfigs($definition);
+
+    expect($configs[1]['type'])->toBe('branch')
+        ->and($configs[1]['configs']['flat']['retry'])->toBe(1)
+        ->and($configs[1]['configs']['nested']['type'])->toBe('nested')
+        ->and($configs[1]['configs']['nested']['configs'][0]['retry'])->toBe(9);
 });

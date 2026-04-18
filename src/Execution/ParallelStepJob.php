@@ -15,8 +15,9 @@ use Illuminate\Support\Facades\Log;
 use Laravel\SerializableClosure\SerializableClosure;
 use ReflectionProperty;
 use Throwable;
-use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 
 /**
@@ -178,15 +179,15 @@ final class ParallelStepJob implements ShouldQueue
                 $property->setValue($job, $this->manifest);
             }
 
-            $this->fireHooks(
+            StepInvoker::fireHooks(
                 $this->manifest->beforeEachHooks,
                 StepDefinition::fromJobClass($this->stepClass),
                 $this->manifest->context,
             );
 
-            $this->invokeStepWithRetry($job);
+            StepInvoker::invokeWithRetry($job, $this->resolveSubStepConfig());
 
-            $this->fireHooks(
+            StepInvoker::fireHooks(
                 $this->manifest->afterEachHooks,
                 StepDefinition::fromJobClass($this->stepClass),
                 $this->manifest->context,
@@ -231,7 +232,7 @@ final class ParallelStepJob implements ShouldQueue
             $this->manifest->failedStepClass = $this->stepClass;
             $this->manifest->failedStepIndex = $this->groupIndex;
 
-            $this->fireHooks(
+            StepInvoker::fireHooks(
                 $this->manifest->onStepFailedHooks,
                 StepDefinition::fromJobClass($this->stepClass),
                 $this->manifest->context,
@@ -274,17 +275,12 @@ final class ParallelStepJob implements ShouldQueue
         $entries = $groupEntry['entries'];
         $entry = $entries[$this->subStepIndex] ?? null;
 
-        if ($entry === null) {
-            return false;
-        }
-
-        // Wrap the closure resolution + invocation so signature/deserialization
+        // Wrap closure resolution + invocation so signature/deserialization
         // errors (InvalidSignatureException if app.key rotated, etc.) are
         // logged with full context instead of surfacing as an opaque sub-step
         // failure several stack frames up.
         try {
-            $closure = $entry['closure']->getClosure();
-            $result = (bool) $closure($this->manifest->context);
+            return StepConditionEvaluator::shouldSkipEntry($entry, $this->manifest->context);
         } catch (Throwable $conditionException) {
             Log::error('Pipeline parallel sub-step condition evaluation failed', [
                 'pipelineId' => $this->manifest->pipelineId,
@@ -295,57 +291,6 @@ final class ParallelStepJob implements ShouldQueue
             ]);
 
             throw $conditionException;
-        }
-
-        $shouldRun = $entry['negated'] ? ! $result : $result;
-
-        return ! $shouldRun;
-    }
-
-    /**
-     * Run the sub-step's handle() with an in-process retry loop.
-     *
-     * Reads the per-sub-step config from
-     * $manifest->stepConfigs[$groupIndex]['configs'][$subStepIndex]. Fast
-     * path when retry is null/zero; retry path otherwise with sleep($backoff)
-     * between non-final attempts. Mirrors PipelineStepJob::invokeStepWithRetry().
-     *
-     * @param object $job The resolved sub-step job instance.
-     * @return void
-     *
-     * @throws Throwable The final attempt's exception when the retry loop exhausts.
-     */
-    private function invokeStepWithRetry(object $job): void
-    {
-        $config = $this->resolveSubStepConfig();
-        $retry = $config['retry'] ?? null;
-
-        if ($retry === null || $retry === 0) {
-            app()->call([$job, 'handle']);
-
-            return;
-        }
-
-        $backoff = $config['backoff'] ?? 0;
-        $maxAttempts = $retry + 1;
-        $attempt = 0;
-
-        while (true) {
-            $attempt++;
-
-            try {
-                app()->call([$job, 'handle']);
-
-                return;
-            } catch (Throwable $exception) {
-                if ($attempt >= $maxAttempts) {
-                    throw $exception;
-                }
-
-                if ($backoff > 0) {
-                    sleep($backoff);
-                }
-            }
         }
     }
 
@@ -373,36 +318,5 @@ final class ParallelStepJob implements ShouldQueue
         $configs = $groupEntry['configs'];
 
         return $configs[$this->subStepIndex] ?? $default;
-    }
-
-    /**
-     * Invoke a hook array in registration order with the appropriate arguments.
-     *
-     * Mirrors PipelineStepJob::fireHooks() / SyncExecutor::fireHooks() per
-     * Story 5.2 Design Decision #2 (three-site duplication preferred over a
-     * shared helper for readability). Unwraps each SerializableClosure and
-     * calls with ($step, $context) or ($step, $context, $exception).
-     * Hook exceptions propagate on first throw: the loop aborts and
-     * subsequent hooks are NOT invoked.
-     *
-     * @param array<int, SerializableClosure> $hooks Ordered list of wrapped hook closures.
-     * @param StepDefinition $step Minimal snapshot of the currently executing sub-step.
-     * @param PipelineContext|null $context The live pipeline context, or null when no context was sent.
-     * @param Throwable|null $exception The caught throwable for onStepFailed hooks; null for beforeEach/afterEach.
-     * @return void
-     */
-    private function fireHooks(array $hooks, StepDefinition $step, ?PipelineContext $context, ?Throwable $exception = null): void
-    {
-        foreach ($hooks as $hook) {
-            $closure = $hook->getClosure();
-
-            if ($exception === null) {
-                $closure($step, $context);
-
-                continue;
-            }
-
-            $closure($step, $context, $exception);
-        }
     }
 }

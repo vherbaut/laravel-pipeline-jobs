@@ -52,6 +52,7 @@ Fonctionnalités clés en un coup d'œil :
 - **Étapes conditionnelles.** Prédicats `when()` / `unless()` évalués contre le contexte en direct.
 - **Hooks de cycle de vie et observabilité.** Six hooks (par étape et au niveau pipeline) pour logs, métriques et alerting.
 - **Pont event listener.** Une ligne pour enregistrer un pipeline comme listener.
+- **Exécution parallèle et branchement.** Groupes fan out / fan in (`JobPipeline::parallel`), sous pipelines imbriqués (`JobPipeline::nest`), branches conditionnelles (`Step::branch`).
 - **Boîte à outils de test complète.** `Pipeline::fake()`, mode recording, snapshots de contexte, assertions de compensation.
 
 ## Prérequis
@@ -68,6 +69,17 @@ composer require vherbaut/laravel-pipeline-jobs
 ```
 
 Le package auto découvre son service provider et sa facade. Aucun enregistrement manuel n'est nécessaire.
+
+### Optionnel : activer les groupes d'étapes parallèles
+
+Les groupes d'étapes parallèles (`JobPipeline::parallel([...])`) distribuent chaque sous étape via `Bus::batch()` de Laravel, qui nécessite la table `job_batches`. Si vous prévoyez d'utiliser des groupes parallèles sur des pipelines en file d'attente, exécutez une fois la commande native de Laravel pour publier et appliquer la migration :
+
+```bash
+php artisan queue:batches-table
+php artisan migrate
+```
+
+Vous pouvez ignorer cette étape si vous n'utilisez jamais de groupes parallèles, ou si vous ne les exécutez qu'en mode synchrone (les pipelines synchrones ne touchent pas à `Bus::batch()`).
 
 ## Démarrage rapide
 
@@ -140,6 +152,9 @@ La documentation anglaise se trouve sous [`docs/en/`](docs/en/). La documentatio
 | Hooks de cycle de vie | Hooks par étape (`beforeEach`, `afterEach`, `onStepFailed`) et callbacks au niveau pipeline (`onSuccess`, `onFailure(Closure)`, `onComplete`). | [docs/fr/lifecycle-hooks.md](docs/fr/lifecycle-hooks.md) |
 | Configuration par étape | Router chaque étape sur sa propre queue ou connexion, forcer l'exécution synchrone, définir retry, backoff et timeout par étape, avec des valeurs par défaut au niveau pipeline. | [docs/fr/per-step-configuration.md](docs/fr/per-step-configuration.md) |
 | Verbe Dispatch | Exécuter un pipeline avec `Pipeline::dispatch([...])` comme alternative à `->make()->run()`, dans le style `Bus::dispatch()`. Auto-exécution au destruct. | [docs/fr/dispatch-verb.md](docs/fr/dispatch-verb.md) |
+| Étapes parallèles | Groupes fan out / fan in via `JobPipeline::parallel([...])`, dispatch `Bus::batch()` en queue, fusion de contexte, contraintes d'imbrication. | [docs/fr/parallel-steps.md](docs/fr/parallel-steps.md) |
+| Imbrication de pipelines | Réutiliser des sous pipelines via `JobPipeline::nest(...)`, cursor imbriqué pour la queue, héritage de la FailStrategy extérieure, valeurs par défaut propres aux sous pipelines. | [docs/fr/pipeline-nesting.md](docs/fr/pipeline-nesting.md) |
+| Branchement conditionnel | Sélectionner une branche à l'exécution via `Step::branch($selector, [...])`, valeurs de branches (class string, StepDefinition, sous pipeline), convergence sur l'étape extérieure suivante. | [docs/fr/conditional-branching.md](docs/fr/conditional-branching.md) |
 | Tests | `Pipeline::fake()`, mode recording, assertions d'étapes et de contexte, assertions de compensation. | [docs/fr/testing.md](docs/fr/testing.md) |
 | Référence API | Catalogue complet des symboles publics, méthodes, propriétés, exceptions et events. | [docs/fr/api-reference.md](docs/fr/api-reference.md) |
 
@@ -147,9 +162,9 @@ La documentation anglaise se trouve sous [`docs/en/`](docs/en/). La documentatio
 
 Les fonctionnalités suivantes sont prévues pour les prochaines versions. Les propriétés correspondantes sont déjà réservées dans le code :
 
-- **Pipelines nommés.** `name('order-fulfillment')` pour une meilleure observabilité et traçabilité.
-- **Étapes parallèles.** Pattern fan out pour les étapes qui peuvent s'exécuter simultanément.
+- **Pipelines nommés au niveau extérieur.** Un `name('order-fulfillment')` pour tagger le pipeline entier (les groupes parallèles, sous pipelines et branches exposent déjà un `name` facultatif).
 - **Événements de pipeline.** Émettre des événements Laravel aux points clés du cycle de vie.
+- **Limitation de débit et concurrence.** Intégration avec le rate limiter de Laravel pour borner la charge par étape.
 
 ## Contribuer
 

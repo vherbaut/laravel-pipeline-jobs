@@ -18,12 +18,21 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
  *
  * Nesting is explicitly out of scope for Epic 8 Story 8.1: a ParallelStepGroup
  * may only contain StepDefinition instances, not other ParallelStepGroup
- * instances. Sub-pipeline nesting lives in Story 8.2.
+ * instances. Story 8.2 landed NestedPipeline support but parallel groups
+ * EXPLICITLY reject NestedPipeline entries: nesting across parallel
+ * boundaries breaks the shared-completedSteps compensation semantic because
+ * ParallelStepGroup deep-clones the manifest per sub-step while nested-
+ * pipeline compensation requires one merged flat list. Wrap the nested
+ * pipeline OUTSIDE the parallel group instead.
  *
  * Conditions on parallel groups are also rejected at build time: individual
  * sub-steps may carry their own Step::when() / Step::unless() closures, but
- * no aggregate when()/unless() is available on the group itself (Story 8.3
- * covers conditional branching).
+ * no aggregate when()/unless() is available on the group itself. Story 8.3
+ * landed ConditionalBranch as the fourth slot type, but branches inside a
+ * parallel group are EXPLICITLY REJECTED via
+ * InvalidPipelineDefinition::conditionalBranchInsideParallelGroup(): parallel
+ * deep-clones the manifest per sub-step, multiplying the selector evaluation
+ * across workers and breaking the single-branch-wins semantic.
  *
  * Payload footprint (NFR11): a parallel group with N sub-steps multiplies
  * the queued payload footprint by N during the batch window because every
@@ -98,6 +107,14 @@ final class ParallelStepGroup
 
             if ($job instanceof self) {
                 throw InvalidPipelineDefinition::nestedParallelGroup();
+            }
+
+            if ($job instanceof NestedPipeline) {
+                throw InvalidPipelineDefinition::nestedPipelineInsideParallelGroup();
+            }
+
+            if ($job instanceof ConditionalBranch) {
+                throw InvalidPipelineDefinition::conditionalBranchInsideParallelGroup();
             }
 
             throw new InvalidPipelineDefinition(
