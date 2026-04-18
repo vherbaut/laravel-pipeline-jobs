@@ -20,7 +20,7 @@ final class PipelineDefinition
     /**
      * Create a new pipeline definition.
      *
-     * @param array<int, StepDefinition|ParallelStepGroup> $steps Ordered list of step definitions (must not be empty). Parallel groups occupy a single outer position.
+     * @param array<int, StepDefinition|ParallelStepGroup|NestedPipeline> $steps Ordered list of step definitions (must not be empty). Parallel groups and nested pipelines each occupy a single outer position.
      * @param bool $shouldBeQueued Whether the pipeline should be dispatched to the queue.
      * @param string|null $name Optional human-readable pipeline name.
      * @param array<int, Closure> $beforeEachHooks Closures to run before each step.
@@ -39,7 +39,7 @@ final class PipelineDefinition
      * @throws InvalidPipelineDefinition When the steps array is empty.
      */
     public function __construct(
-        /** @var array<int, StepDefinition|ParallelStepGroup> */
+        /** @var array<int, StepDefinition|ParallelStepGroup|NestedPipeline> */
         public readonly array $steps,
         public readonly bool $shouldBeQueued = false,
         public readonly ?string $name = null,
@@ -78,21 +78,34 @@ final class PipelineDefinition
     /**
      * Get the total number of SUB-STEPS across the pipeline.
      *
-     * Parallel groups expand to their inner sub-step count; non-parallel
-     * entries count as one. Used for observability and test assertions
-     * where the expanded job count matters (e.g., "this pipeline dispatches
-     * N queued jobs across parallel batches").
+     * Parallel groups expand to their inner sub-step count; nested
+     * pipelines recurse via the inner definition's flatStepCount() so
+     * nested parallel groups and nested-nested sub-pipelines expand
+     * transitively. Non-group entries count as one. Used for observability
+     * and test assertions where the expanded job count matters
+     * (e.g., "this pipeline dispatches N queued jobs across parallel
+     * batches and nested sub-pipelines").
      *
-     * @return int The total count of StepDefinition instances (parallel groups expanded).
+     * @return int The total count of StepDefinition instances (parallel and nested groups expanded recursively).
      */
     public function flatStepCount(): int
     {
         $total = 0;
 
         foreach ($this->steps as $step) {
-            $total += $step instanceof ParallelStepGroup
-                ? count($step->steps)
-                : 1;
+            if ($step instanceof ParallelStepGroup) {
+                $total += count($step->steps);
+
+                continue;
+            }
+
+            if ($step instanceof NestedPipeline) {
+                $total += $step->definition->flatStepCount();
+
+                continue;
+            }
+
+            $total += 1;
         }
 
         return $total;
@@ -103,11 +116,23 @@ final class PipelineDefinition
      *
      * Iterates outer positions and, for ParallelStepGroup positions,
      * recurses into their sub-steps so each sub-step with a compensation
-     * class is registered on the flat mapping. The resulting shape is
-     * unchanged from the non-parallel case: a class-name-keyed lookup used
-     * by the saga compensation chain at reverse-order rollback time.
+     * class is registered on the flat mapping. For NestedPipeline positions,
+     * recurses into the inner definition's compensationMapping() and merges
+     * the result via array_merge(). Duplicate step-class semantics follow
+     * outer-loop iteration order: when the same step class carries different
+     * compensations in more than one declaration site (outer direct entry,
+     * inner nested entry, parallel sub-step, or another nested-nested
+     * entry), the LAST declaration processed wins. Because the outer foreach
+     * visits entries in declaration order, a nested wrapper declared AFTER
+     * an outer step with the same class overrides the outer mapping; a
+     * nested wrapper declared BEFORE a duplicate outer step is overridden
+     * by it. This mirrors the Story 3-3 "duplicate step class silently
+     * loses compensation mapping" note in deferred-work.md.
+     * The resulting shape is unchanged from the non-parallel / non-nested
+     * case: a class-name-keyed lookup used by the saga compensation chain
+     * at reverse-order rollback time.
      *
-     * @return array<string, string> Map of step class name to compensation class name.
+     * @return array<string, string> Map of step class name to compensation class name; flat across parallel and nested groups.
      */
     public function compensationMapping(): array
     {
@@ -120,6 +145,12 @@ final class PipelineDefinition
                         $mapping[$subStep->jobClass] = $subStep->compensationJobClass;
                     }
                 }
+
+                continue;
+            }
+
+            if ($step instanceof NestedPipeline) {
+                $mapping = array_merge($mapping, $step->definition->compensationMapping());
 
                 continue;
             }

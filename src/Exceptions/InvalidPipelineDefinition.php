@@ -52,4 +52,27 @@ class InvalidPipelineDefinition extends PipelineException
             .'A ParallelStepGroup may only contain class-strings or StepDefinition instances.',
         );
     }
+
+    /**
+     * Create an exception for a parallel step group containing a nested pipeline.
+     *
+     * Story 8.2 adds NestedPipeline as a third slot type within a pipeline's
+     * outer $steps array, but embedding a nested pipeline inside a parallel
+     * group is explicitly rejected. Rationale: ParallelStepGroup deep-clones
+     * the manifest per sub-step so sub-steps can run concurrently, which
+     * conflicts with the shared-completedSteps semantic that nested-pipeline
+     * saga compensation relies on. Wrapping the pipeline OUTSIDE the parallel
+     * group (or flattening its inner steps into the group) is the intended
+     * escape hatch.
+     *
+     * @return self
+     */
+    public static function nestedPipelineInsideParallelGroup(): self
+    {
+        return new self(
+            'Nested pipelines cannot be embedded inside parallel step groups; '
+            .'nesting across parallel boundaries breaks the shared-completedSteps compensation semantic. '
+            .'Wrap the pipeline OUTSIDE the parallel group instead.',
+        );
+    }
 }

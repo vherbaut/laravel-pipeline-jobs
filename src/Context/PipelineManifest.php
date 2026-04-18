@@ -6,6 +6,8 @@ namespace Vherbaut\LaravelPipelineJobs\Context;
 
 use Illuminate\Support\Str;
 use Laravel\SerializableClosure\SerializableClosure;
+use LogicException;
+use ReflectionClass;
 use Throwable;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 
@@ -85,6 +87,33 @@ final class PipelineManifest
     public array $onStepFailedHooks = [];
 
     /**
+     * Cursor path into a nested-pipeline position, empty when executing at the outer level.
+     *
+     * Linear path-array representing the current position inside a
+     * NestedPipeline hierarchy. Each element is an integer index into the
+     * enclosing level's steps array:
+     *  - `[]` — not inside any nested group; $currentStepIndex names the
+     *    executing outer step.
+     *  - `[p, i]` — executing inner step i of the nested group at outer
+     *    position p.
+     *  - `[p, i, j]` — executing inner-inner step j of the nested group at
+     *    inner position i of the nested group at outer position p.
+     *
+     * Supports arbitrary-depth nesting: each level of nesting appends one
+     * element to the path; stepClassAt() navigates N levels by recursing
+     * through `['steps']` keys. Cleared to `[]` when the nested group
+     * completes and execution returns to the outer level.
+     *
+     * Serialized in __serialize() / __unserialize() so queued nested
+     * execution can resume across worker hops. Legacy payloads (predating
+     * Story 8.2) default the field to `[]` on unserialize, matching the
+     * defensive ?? pattern used for other post-Story-1 fields.
+     *
+     * @var array<int, int>
+     */
+    public array $nestedCursor = [];
+
+    /**
      * Pipeline-level onSuccess callback (wrapped in SerializableClosure for queue transport).
      *
      * Populated by PipelineBuilder::run() / PipelineBuilder::toListener() /
@@ -146,48 +175,48 @@ final class PipelineManifest
      *
      * @param string $pipelineId Unique identifier for this pipeline run (UUID).
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
-     * @param array<int, string|array{type: string, classes: array<int, string>}> $stepClasses Ordered list of job class names. Parallel-group positions carry a nested `['type' => 'parallel', 'classes' => array<int, string>]` shape in lieu of a flat class-string.
+     * @param array<int, string|array<string, mixed>> $stepClasses Ordered list of job class names. Parallel-group positions carry a nested `['type' => 'parallel', 'classes' => array<int, string>]` shape in lieu of a flat class-string.
      * @param array<string, string> $compensationMapping Map of step class name to compensation class name.
-     * @param array<int, array{closure: SerializableClosure, negated: bool}|array{type: string, entries: array<int, array{closure: SerializableClosure, negated: bool}|null>}> $stepConditions Per-step condition entries keyed by step index. Parallel groups carry a nested `['type' => 'parallel', 'entries' => [...]]` shape where each inner entry is the flat shape or null for an unconditional sub-step.
+     * @param array<int, array<string, mixed>> $stepConditions Per-step condition entries keyed by step index. Parallel groups carry a nested `['type' => 'parallel', 'entries' => [...]]` shape where each inner entry is the flat shape or null for an unconditional sub-step.
      * @param int $currentStepIndex Index of the current step being executed.
      * @param array<int, string> $completedSteps List of completed step class names.
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so queued executors can decide whether to trigger compensation after a step failure.
-     * @param array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}|array{type: string, configs: array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}>}> $stepConfigs Per-step resolved queue / connection / sync / retry count / backoff delay (seconds) / wrapper timeout (seconds) configuration indexed by step position. Parallel groups carry a nested `['type' => 'parallel', 'configs' => [...]]` shape where each inner entry is the flat config shape per sub-step.
+     * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry count / backoff delay (seconds) / wrapper timeout (seconds) configuration indexed by step position. Parallel groups carry a nested `['type' => 'parallel', 'configs' => [...]]` shape where each inner entry is the flat config shape per sub-step.
      */
     public function __construct(
         public readonly string $pipelineId,
         public readonly ?string $pipelineName,
-        /** @var array<int, string|array{type: string, classes: array<int, string>}> */
+        /** @var array<int, string|array<string, mixed>> */
         public readonly array $stepClasses,
         /** @var array<string, string> */
         public readonly array $compensationMapping,
-        /** @var array<int, array{closure: SerializableClosure, negated: bool}|array{type: string, entries: array<int, array{closure: SerializableClosure, negated: bool}|null>}> */
+        /** @var array<int, array<string, mixed>> */
         public readonly array $stepConditions,
         public int $currentStepIndex,
         /** @var array<int, string> */
         public array $completedSteps,
         public ?PipelineContext $context,
         public FailStrategy $failStrategy = FailStrategy::StopImmediately,
-        /** @var array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}|array{type: string, configs: array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}>}> */
+        /** @var array<int, array<string, mixed>> */
         public readonly array $stepConfigs = [],
     ) {}
 
     /**
      * Create a new pipeline manifest with auto-generated UUID and default execution state.
      *
-     * @param array<int, string|array{type: string, classes: array<int, string>}> $stepClasses Ordered list of job class names; parallel positions carry a nested shape.
+     * @param array<int, string|array<string, mixed>> $stepClasses Ordered list of job class names; parallel positions carry a nested shape.
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param array<string, string> $compensationMapping Map of step class name to compensation class name.
      * @param string|null $pipelineName Optional human-readable name for this pipeline.
-     * @param array<int, array{closure: SerializableClosure, negated: bool}|array{type: string, entries: array<int, array{closure: SerializableClosure, negated: bool}|null>}> $stepConditions Per-step condition entries keyed by step index; parallel groups carry a nested shape.
+     * @param array<int, array<string, mixed>> $stepConditions Per-step condition entries keyed by step index; parallel groups carry a nested shape.
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so executors can decide whether to trigger compensation after a step failure.
-     * @param array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}|array{type: string, configs: array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}>}> $stepConfigs Per-step resolved queue / connection / sync / retry / backoff / timeout configuration indexed by step position; parallel positions carry a nested shape.
+     * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry / backoff / timeout configuration indexed by step position; parallel positions carry a nested shape.
      *
      * @return self
      */
     public static function create(
-        /** @var array<int, string|array{type: string, classes: array<int, string>}> */
+        /** @var array<int, string|array<string, mixed>> */
         array $stepClasses,
         ?PipelineContext $context = null,
         array $compensationMapping = [],
@@ -279,6 +308,7 @@ final class PipelineManifest
             'onSuccessCallback' => $this->onSuccessCallback,
             'onFailureCallback' => $this->onFailureCallback,
             'onCompleteCallback' => $this->onCompleteCallback,
+            'nestedCursor' => $this->nestedCursor,
         ];
     }
 
@@ -315,5 +345,271 @@ final class PipelineManifest
         $this->onSuccessCallback = $data['onSuccessCallback'] ?? null;
         $this->onFailureCallback = $data['onFailureCallback'] ?? null;
         $this->onCompleteCallback = $data['onCompleteCallback'] ?? null;
+        $this->nestedCursor = $data['nestedCursor'] ?? [];
+    }
+
+    /**
+     * Produce a deep-cloned manifest whose stepConfigs[$index] has been replaced with the given entry.
+     *
+     * The readonly $stepConfigs property forbids in-place mutation after
+     * construction, so this helper re-hydrates a fresh instance through the
+     * __serialize / __unserialize lifecycle with the replacement entry
+     * substituted in the serialized array. All other readonly and mutable
+     * state (hooks, callbacks, context, currentStepIndex, completedSteps,
+     * nestedCursor, etc.) is deep-cloned via serialize / unserialize so
+     * sub-step workers operate on independent state.
+     *
+     * Intended caller: PipelineStepJob::dispatchParallelBatch() when a
+     * parallel group sits inside a NestedPipeline. The outer manifest's
+     * stepConfigs[$cursor[0]] is a nested shape; the effective parallel
+     * shape lives at stepConfigAt($cursor). ParallelStepJob (a
+     * forbidden-edit file) reads stepConfigs[$groupIndex] via a flat
+     * lookup, so each cloned manifest has its stepConfigs[$groupIndex]
+     * re-keyed to the parallel shape to keep per-sub-step retry / backoff
+     * resolution intact for parallel-inside-nested.
+     *
+     * @param int $index The zero-based outer position whose stepConfigs entry is replaced.
+     * @param array<string, mixed> $entry The replacement stepConfigs entry at that position.
+     *
+     * @return self A deep-cloned manifest with the replacement applied.
+     */
+    public function withRekeyedStepConfig(int $index, array $entry): self
+    {
+        $data = $this->__serialize();
+        $data['stepConfigs'][$index] = $entry;
+
+        /** @var self $rehydrated */
+        $rehydrated = (new ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        /** @var array<string, mixed> $deepCloned */
+        $deepCloned = unserialize(serialize($data));
+        $rehydrated->__unserialize($deepCloned);
+
+        return $rehydrated;
+    }
+
+    /**
+     * Navigate the nested-stepClasses tree to resolve the entry at the given cursor path.
+     *
+     * Empty path returns the top-level entry at the current $currentStepIndex
+     * (behaves as a no-op lookup for non-nested execution). A one-element
+     * path `[p]` returns stepClasses[p] verbatim (used sparingly: the cursor
+     * is cleared to `[]` once execution returns to the outer level, so the
+     * single-element form mostly surfaces in transitional state). Longer
+     * paths recurse: the second element indexes into stepClasses[p]['steps']
+     * if the entry is a nested shape OR stepClasses[p]['classes'] if the
+     * entry is a parallel shape. The navigation stops when it lands on a
+     * class-string or parallel-shape leaf; further path elements beyond the
+     * nested-to-flat transition are a programmer error and throw
+     * LogicException with a diagnostic message.
+     *
+     * @param array<int, int> $path Cursor path from outer-root down to the target entry. Empty path resolves to the current outer index.
+     *
+     * @return string|array<string, mixed> The resolved stepClasses entry: class-string for a flat step, parallel-shape array for a parallel sub-group, or nested-shape array for a nested sub-pipeline.
+     *
+     * @throws LogicException When the cursor path cannot be navigated (e.g., an intermediate segment lands on a non-navigable entry or the outer index is out of range).
+     */
+    public function stepClassAt(array $path): string|array
+    {
+        if ($path === []) {
+            if (! array_key_exists($this->currentStepIndex, $this->stepClasses)) {
+                throw new LogicException(
+                    'PipelineManifest::stepClassAt called with empty path but currentStepIndex '
+                    .$this->currentStepIndex.' is out of range for stepClasses array of size '
+                    .count($this->stepClasses).'.',
+                );
+            }
+
+            return $this->stepClasses[$this->currentStepIndex];
+        }
+
+        $rootIndex = $path[0];
+
+        if (! array_key_exists($rootIndex, $this->stepClasses)) {
+            throw new LogicException(
+                'PipelineManifest::stepClassAt cursor path root index '.$rootIndex
+                .' is out of range for stepClasses array of size '.count($this->stepClasses).'.',
+            );
+        }
+
+        $current = $this->stepClasses[$rootIndex];
+        $pathLength = count($path);
+
+        for ($depth = 1; $depth < $pathLength; $depth++) {
+            $segment = $path[$depth];
+
+            if (! is_array($current)) {
+                throw new LogicException(
+                    'PipelineManifest::stepClassAt cannot descend into segment '.$segment
+                    .' at depth '.$depth.': reached a non-array entry (likely a class-string).',
+                );
+            }
+
+            $type = $current['type'] ?? null;
+
+            if ($type === 'nested') {
+                /** @var array<int, string|array<string, mixed>> $innerSteps */
+                $innerSteps = $current['steps'] ?? [];
+
+                if (! array_key_exists($segment, $innerSteps)) {
+                    throw new LogicException(
+                        'PipelineManifest::stepClassAt nested inner index '.$segment
+                        .' is out of range at depth '.$depth.'.',
+                    );
+                }
+
+                $current = $innerSteps[$segment];
+
+                continue;
+            }
+
+            if ($type === 'parallel') {
+                /** @var array<int, string> $parallelClasses */
+                $parallelClasses = $current['classes'] ?? [];
+
+                if (! array_key_exists($segment, $parallelClasses)) {
+                    throw new LogicException(
+                        'PipelineManifest::stepClassAt parallel inner index '.$segment
+                        .' is out of range at depth '.$depth.'.',
+                    );
+                }
+
+                $current = $parallelClasses[$segment];
+
+                continue;
+            }
+
+            throw new LogicException(
+                'PipelineManifest::stepClassAt cannot descend into entry with unknown type '
+                .var_export($type, true).' at depth '.$depth.'.',
+            );
+        }
+
+        return $current;
+    }
+
+    /**
+     * Navigate the nested-stepConfigs tree to resolve the config entry at the given cursor path.
+     *
+     * Mirrors stepClassAt() but traverses $stepConfigs via `['configs']`
+     * at both nested and parallel levels (stepConfigs uses `configs` for
+     * both parallel sub-entries and nested inner entries). Returns the
+     * resolved config: a flat config array for a single step, OR a
+     * parallel / nested discriminator-tagged array for a sub-group
+     * position. Returns an empty array when the manifest is legacy or the
+     * path cannot be navigated; callers merge with a default-config shape.
+     *
+     * @param array<int, int> $path Cursor path from outer-root down to the target entry. Empty path resolves to the current outer index.
+     *
+     * @return array<string, mixed> The resolved stepConfigs entry (flat config or discriminator-tagged sub-shape); empty array when legacy/unavailable.
+     */
+    public function stepConfigAt(array $path): array
+    {
+        if ($path === []) {
+            $entry = $this->stepConfigs[$this->currentStepIndex] ?? null;
+
+            return is_array($entry) ? $entry : [];
+        }
+
+        $rootIndex = $path[0];
+        $entry = $this->stepConfigs[$rootIndex] ?? null;
+
+        if (! is_array($entry)) {
+            return [];
+        }
+
+        $current = $entry;
+        $pathLength = count($path);
+
+        for ($depth = 1; $depth < $pathLength; $depth++) {
+            $segment = $path[$depth];
+            $type = $current['type'] ?? null;
+
+            if ($type !== 'nested' && $type !== 'parallel') {
+                return [];
+            }
+
+            /** @var array<int, array<string, mixed>> $innerConfigs */
+            $innerConfigs = $current['configs'] ?? [];
+
+            if (! array_key_exists($segment, $innerConfigs)) {
+                return [];
+            }
+
+            $current = $innerConfigs[$segment];
+        }
+
+        return $current;
+    }
+
+    /**
+     * Navigate the nested-stepConditions tree to resolve the condition entry at the given cursor path.
+     *
+     * Mirrors stepConfigAt() but traverses $stepConditions via `['entries']`
+     * at both nested and parallel levels. Returns the resolved condition
+     * entry (a flat `['closure' => ..., 'negated' => ...]` shape), or null
+     * when the entry is absent / unconditional / group-shaped (group-shaped
+     * entries are handled by the enclosing dispatcher, not evaluated as a
+     * per-step condition here).
+     *
+     * @param array<int, int> $path Cursor path from outer-root down to the target entry. Empty path resolves to the current outer index.
+     *
+     * @return array{closure: SerializableClosure, negated: bool}|null The resolved flat condition entry or null when unconditional / group-shaped.
+     */
+    public function conditionAt(array $path): ?array
+    {
+        if ($path === []) {
+            $entry = $this->stepConditions[$this->currentStepIndex] ?? null;
+
+            if (! is_array($entry)) {
+                return null;
+            }
+
+            if (isset($entry['type'])) {
+                return null;
+            }
+
+            /** @var array{closure: SerializableClosure, negated: bool} $entry */
+            return $entry;
+        }
+
+        $rootIndex = $path[0];
+        $entry = $this->stepConditions[$rootIndex] ?? null;
+
+        if (! is_array($entry)) {
+            return null;
+        }
+
+        $current = $entry;
+        $pathLength = count($path);
+
+        for ($depth = 1; $depth < $pathLength; $depth++) {
+            $segment = $path[$depth];
+
+            if ($current === null) {
+                return null;
+            }
+
+            $type = $current['type'] ?? null;
+
+            if ($type !== 'nested' && $type !== 'parallel') {
+                return null;
+            }
+
+            /** @var array<int, array<string, mixed>|null> $innerEntries */
+            $innerEntries = $current['entries'] ?? [];
+
+            $current = array_key_exists($segment, $innerEntries) ? $innerEntries[$segment] : null;
+        }
+
+        if ($current === null) {
+            return null;
+        }
+
+        if (isset($current['type'])) {
+            return null;
+        }
+
+        /** @var array{closure: SerializableClosure, negated: bool} $current */
+        return $current;
     }
 }

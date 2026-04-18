@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\JobPipeline;
+use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -62,6 +64,16 @@ it('throws InvalidPipelineDefinition with the offending type named for non-strin
     } catch (InvalidPipelineDefinition $exception) {
         expect($exception->getMessage())->toContain('int');
     }
+});
+
+it('rejects a NestedPipeline entry with the Story 8.2 nestedPipelineInsideParallelGroup factory', function (): void {
+    $nested = NestedPipeline::fromBuilder(JobPipeline::make([FakeJobA::class]));
+
+    expect(fn () => ParallelStepGroup::fromArray([FakeJobA::class, $nested]))
+        ->toThrow(
+            InvalidPipelineDefinition::class,
+            'Nested pipelines cannot be embedded inside parallel step groups',
+        );
 });
 
 it('is a final class with a readonly steps property and a private constructor', function (): void {

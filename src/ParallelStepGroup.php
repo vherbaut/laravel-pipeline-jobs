@@ -18,7 +18,12 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
  *
  * Nesting is explicitly out of scope for Epic 8 Story 8.1: a ParallelStepGroup
  * may only contain StepDefinition instances, not other ParallelStepGroup
- * instances. Sub-pipeline nesting lives in Story 8.2.
+ * instances. Story 8.2 landed NestedPipeline support but parallel groups
+ * EXPLICITLY reject NestedPipeline entries: nesting across parallel
+ * boundaries breaks the shared-completedSteps compensation semantic because
+ * ParallelStepGroup deep-clones the manifest per sub-step while nested-
+ * pipeline compensation requires one merged flat list. Wrap the nested
+ * pipeline OUTSIDE the parallel group instead.
  *
  * Conditions on parallel groups are also rejected at build time: individual
  * sub-steps may carry their own Step::when() / Step::unless() closures, but
@@ -98,6 +103,10 @@ final class ParallelStepGroup
 
             if ($job instanceof self) {
                 throw InvalidPipelineDefinition::nestedParallelGroup();
+            }
+
+            if ($job instanceof NestedPipeline) {
+                throw InvalidPipelineDefinition::nestedPipelineInsideParallelGroup();
             }
 
             throw new InvalidPipelineDefinition(

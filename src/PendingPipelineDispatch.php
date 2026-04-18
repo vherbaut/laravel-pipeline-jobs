@@ -235,6 +235,39 @@ class PendingPipelineDispatch
     }
 
     /**
+     * Proxies PipelineBuilder::addNestedPipeline() and returns the wrapper for chainability.
+     *
+     * Append a pre-built NestedPipeline to the pipeline.
+     *
+     * @param NestedPipeline $nested Pre-built nested pipeline wrapping an inner PipelineDefinition.
+     * @return static
+     */
+    public function addNestedPipeline(NestedPipeline $nested): static
+    {
+        $this->builder->addNestedPipeline($nested);
+
+        return $this;
+    }
+
+    /**
+     * Proxies PipelineBuilder::nest() and returns the wrapper for chainability.
+     *
+     * Append a nested sub-pipeline built from a PipelineBuilder or PipelineDefinition.
+     *
+     * @param PipelineBuilder|PipelineDefinition $pipeline Inner pipeline to wrap; builder form is built eagerly at wrap time.
+     * @param string|null $name Optional user-visible sub-pipeline name for observability; defaults to null.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition Propagated from PipelineBuilder::build() when called with a builder that has no steps.
+     */
+    public function nest(PipelineBuilder|PipelineDefinition $pipeline, ?string $name = null): static
+    {
+        $this->builder->nest($pipeline, $name);
+
+        return $this;
+    }
+
+    /**
      * Proxies PipelineBuilder::when() and returns the wrapper for chainability.
      *
      * Append a step that only runs when the condition evaluates to true.

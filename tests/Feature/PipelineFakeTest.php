@@ -592,3 +592,54 @@ it('Pipeline::fake()->recording() replays a parallel group sequentially through 
         TrackExecutionJobC::class,
     ]);
 });
+
+// --- Story 8.2: NestedPipeline assertions -------------------------------------------------
+
+it('records a nested pipeline in the recorded definition steps array', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        FakeJobA::class,
+        JobPipeline::nest(JobPipeline::make([FakeJobB::class, FakeJobC::class]), 'child-flow'),
+    ])->send(new SimpleContext)->run();
+
+    Pipeline::assertNestedPipelineExecuted([FakeJobB::class, FakeJobC::class]);
+    Pipeline::assertNestedPipelineExecuted([FakeJobB::class, FakeJobC::class], 'child-flow');
+});
+
+it('assertNestedPipelineExecuted fails when the expected class list does not match', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        FakeJobA::class,
+        JobPipeline::nest(JobPipeline::make([FakeJobB::class])),
+    ])->send(new SimpleContext)->run();
+
+    expect(fn () => Pipeline::assertNestedPipelineExecuted([FakeJobB::class, FakeJobC::class]))
+        ->toThrow(AssertionFailedError::class, 'none of the 1 recorded nested pipeline(s) matched');
+});
+
+it('assertNestedPipelineExecuted fails with a clear message when no nested pipeline was recorded at all', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class, FakeJobB::class])->send(new SimpleContext)->run();
+
+    expect(fn () => Pipeline::assertNestedPipelineExecuted([FakeJobA::class]))
+        ->toThrow(AssertionFailedError::class, 'recorded no nested pipelines');
+});
+
+it('Pipeline::fake()->recording() replays a nested pipeline sequentially through RecordingExecutor', function (): void {
+    Pipeline::fake()->recording();
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        JobPipeline::nest(JobPipeline::make([TrackExecutionJobB::class, TrackExecutionJobC::class])),
+    ])->send(new SimpleContext)->run();
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobC::class,
+    ]);
+});

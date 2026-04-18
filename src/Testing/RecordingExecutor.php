@@ -86,7 +86,27 @@ final class RecordingExecutor implements PipelineExecutor
     {
         foreach ($manifest->stepClasses as $stepIndex => $stepClass) {
             if (is_array($stepClass)) {
-                $this->executeParallelGroup($manifest, $stepIndex, $stepClass['classes']);
+                $type = $stepClass['type'] ?? null;
+
+                if ($type === 'nested') {
+                    /** @var array<int, string|array<string, mixed>> $innerSteps */
+                    $innerSteps = $stepClass['steps'] ?? [];
+
+                    $groupConditions = $manifest->stepConditions[$stepIndex] ?? null;
+
+                    /** @var array<int, array<string, mixed>|null> $innerConditionsEntries */
+                    $innerConditionsEntries = (is_array($groupConditions) && ($groupConditions['type'] ?? null) === 'nested')
+                        ? $groupConditions['entries']
+                        : [];
+
+                    $this->executeNestedPipeline($manifest, $stepIndex, $innerSteps, $innerConditionsEntries);
+
+                    continue;
+                }
+
+                /** @var array<int, string> $parallelClasses */
+                $parallelClasses = $stepClass['classes'] ?? [];
+                $this->executeParallelGroup($manifest, $stepIndex, $parallelClasses);
 
                 continue;
             }
@@ -393,6 +413,204 @@ final class RecordingExecutor implements PipelineExecutor
                     $manifest->currentStepIndex,
                     $subStepClass,
                     $subException,
+                );
+            }
+        }
+
+        $manifest->advanceStep();
+    }
+
+    /**
+     * Replay a nested-pipeline group's inner steps sequentially in recording mode.
+     *
+     * Mirrors SyncExecutor::executeNestedPipeline() so Pipeline::fake()->recording()
+     * observes the same sequential-sync semantics (AC #14). Each inner
+     * step's completion is recorded in $this->executedSteps and a context
+     * snapshot is captured after its successful run. Failure handling
+     * matches the single-step failure path (onStepFailed, FailStrategy
+     * branching) with the failing inner step's class surfaced on the
+     * manifest; failedStepIndex records the ENCLOSING nested group's outer
+     * position for downstream diagnostics.
+     *
+     * Parallel sub-groups inside the nested pipeline recurse through
+     * executeParallelGroup() (parallel-inside-nested is supported per AC #1).
+     * Nested-inside-nested entries recurse through this helper.
+     *
+     * The outer pipeline's hooks and callbacks govern; the inner
+     * PipelineDefinition's own hook/callback slots are IGNORED (mirrors
+     * SyncExecutor::executeNestedPipeline() design decisions 6 and 7).
+     *
+     * @param PipelineManifest $manifest The manifest driving execution state.
+     * @param int $groupIndex The outer position of the nested group.
+     * @param array<int, string|array<string, mixed>> $innerSteps Inner-step entries in declaration order: class-string, parallel shape, or nested shape.
+     * @param array<int, array<string, mixed>|null> $innerConditionsEntries Per-inner-position condition entries aligned with $innerSteps.
+     * @return void
+     *
+     * @throws StepExecutionFailed When an inner step fails under StopImmediately / StopAndCompensate.
+     */
+    private function executeNestedPipeline(
+        PipelineManifest $manifest,
+        int $groupIndex,
+        array $innerSteps,
+        array $innerConditionsEntries,
+    ): void {
+        foreach ($innerSteps as $subIndex => $entry) {
+            $conditionEntry = $innerConditionsEntries[$subIndex] ?? null;
+
+            if (is_array($entry)) {
+                $entryType = $entry['type'] ?? null;
+
+                if ($entryType === 'parallel') {
+                    /** @var array<int, string> $subSubClasses */
+                    $subSubClasses = $entry['classes'] ?? [];
+
+                    $savedIndex = $manifest->currentStepIndex;
+                    $manifest->currentStepIndex = $groupIndex;
+                    $this->executeParallelGroup($manifest, $groupIndex, $subSubClasses);
+                    // executeParallelGroup advances the outer index; inside a
+                    // nested group we do NOT want that. Restore.
+                    $manifest->currentStepIndex = $savedIndex;
+
+                    continue;
+                }
+
+                if ($entryType === 'nested') {
+                    /** @var array<int, string|array<string, mixed>> $innerInnerSteps */
+                    $innerInnerSteps = $entry['steps'] ?? [];
+
+                    /** @var array<int, array<string, mixed>|null> $innerInnerConditions */
+                    $innerInnerConditions = (is_array($conditionEntry) && ($conditionEntry['type'] ?? null) === 'nested')
+                        ? $conditionEntry['entries']
+                        : [];
+
+                    $this->executeNestedPipeline($manifest, $groupIndex, $innerInnerSteps, $innerInnerConditions);
+
+                    continue;
+                }
+
+                throw new LogicException(
+                    'RecordingExecutor::executeNestedPipeline encountered unknown inner-entry type '
+                    .var_export($entryType, true).' at outer position '.$groupIndex.', inner position '.$subIndex.'.',
+                );
+            }
+
+            try {
+                /** @var array{closure: SerializableClosure, negated: bool}|null $flatConditionEntry */
+                $flatConditionEntry = (is_array($conditionEntry) && ! isset($conditionEntry['type']))
+                    ? $conditionEntry
+                    : null;
+
+                if ($flatConditionEntry !== null) {
+                    $closure = $flatConditionEntry['closure']->getClosure();
+                    $result = (bool) $closure($manifest->context);
+                    $shouldRun = $flatConditionEntry['negated'] ? ! $result : $result;
+
+                    if (! $shouldRun) {
+                        continue;
+                    }
+                }
+
+                $job = app()->make($entry);
+
+                if (property_exists($job, 'pipelineManifest')) {
+                    $property = new ReflectionProperty($job, 'pipelineManifest');
+                    $property->setValue($job, $manifest);
+                }
+
+                $this->fireHooks(
+                    $manifest->beforeEachHooks,
+                    StepDefinition::fromJobClass($entry),
+                    $manifest->context,
+                );
+
+                app()->call([$job, 'handle']);
+
+                $this->fireHooks(
+                    $manifest->afterEachHooks,
+                    StepDefinition::fromJobClass($entry),
+                    $manifest->context,
+                );
+
+                $manifest->markStepCompleted($entry);
+                $this->executedSteps[] = $entry;
+
+                if ($manifest->context !== null) {
+                    $this->contextSnapshots[] = unserialize(serialize($manifest->context));
+                }
+            } catch (Throwable $innerException) {
+                $cause = $innerException instanceof StepExecutionFailed
+                    ? ($innerException->getPrevious() ?? $innerException)
+                    : $innerException;
+
+                $manifest->failureException = $cause;
+                $manifest->failedStepClass = $entry;
+                $manifest->failedStepIndex = $groupIndex;
+
+                try {
+                    $this->fireHooks(
+                        $manifest->onStepFailedHooks,
+                        StepDefinition::fromJobClass($entry),
+                        $manifest->context,
+                        $cause,
+                    );
+                } catch (Throwable $hookException) {
+                    throw StepExecutionFailed::forStep(
+                        $manifest->pipelineId,
+                        $groupIndex,
+                        $entry,
+                        $hookException,
+                    );
+                }
+
+                if ($manifest->failStrategy === FailStrategy::SkipAndContinue) {
+                    Log::warning('Pipeline nested inner step skipped under SkipAndContinue', [
+                        'pipelineId' => $manifest->pipelineId,
+                        'groupIndex' => $groupIndex,
+                        'innerStepClass' => $entry,
+                        'innerStepIndex' => $subIndex,
+                        'exception' => $cause->getMessage(),
+                    ]);
+
+                    $manifest->failureException = null;
+
+                    continue;
+                }
+
+                $this->runCompensation($manifest);
+
+                try {
+                    $this->firePipelineCallback(
+                        $manifest->onFailureCallback,
+                        $manifest->context,
+                        $cause,
+                    );
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $groupIndex,
+                        $entry,
+                        $callbackException,
+                        $cause,
+                    );
+                }
+
+                try {
+                    $this->firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $manifest->pipelineId,
+                        $groupIndex,
+                        $entry,
+                        $callbackException,
+                        $cause,
+                    );
+                }
+
+                throw StepExecutionFailed::forStep(
+                    $manifest->pipelineId,
+                    $groupIndex,
+                    $entry,
+                    $cause,
                 );
             }
         }

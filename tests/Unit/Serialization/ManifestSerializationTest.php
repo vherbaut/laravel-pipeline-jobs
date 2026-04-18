@@ -427,3 +427,108 @@ it('defaults stepConfigs to an empty array when deserializing a legacy payload',
 
     expect($restored->stepConfigs)->toBe([]);
 });
+
+// --- Story 8.2: nested shape serialization + nestedCursor ---------------------------------
+
+it('preserves nested-shape stepClasses through serialization round-trip (only StepDefinition sub-steps)', function (): void {
+    $stepClasses = [
+        'App\\Jobs\\Outer',
+        [
+            'type' => 'nested',
+            'name' => 'sub-flow',
+            'steps' => ['App\\Jobs\\InnerA', 'App\\Jobs\\InnerB'],
+        ],
+    ];
+
+    $manifest = PipelineManifest::create(stepClasses: $stepClasses);
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->stepClasses)->toBe($stepClasses);
+});
+
+it('preserves nested-shape stepClasses through serialization round-trip (nested with parallel inner)', function (): void {
+    $stepClasses = [
+        [
+            'type' => 'nested',
+            'name' => null,
+            'steps' => [
+                'App\\Jobs\\InnerA',
+                ['type' => 'parallel', 'classes' => ['App\\Jobs\\P1', 'App\\Jobs\\P2']],
+                'App\\Jobs\\InnerB',
+            ],
+        ],
+    ];
+
+    $manifest = PipelineManifest::create(stepClasses: $stepClasses);
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->stepClasses)->toBe($stepClasses);
+});
+
+it('preserves nested-inside-nested two-level shape through serialization round-trip', function (): void {
+    $stepClasses = [
+        [
+            'type' => 'nested',
+            'name' => 'outer-nested',
+            'steps' => [
+                'App\\Jobs\\MidA',
+                [
+                    'type' => 'nested',
+                    'name' => 'inner-nested',
+                    'steps' => ['App\\Jobs\\DeepA', 'App\\Jobs\\DeepB'],
+                ],
+            ],
+        ],
+    ];
+
+    $manifest = PipelineManifest::create(stepClasses: $stepClasses);
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->stepClasses)->toBe($stepClasses);
+});
+
+it('preserves nestedCursor through serialization round-trip', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: ['A', ['type' => 'nested', 'name' => null, 'steps' => ['B', 'C']]]);
+    $manifest->nestedCursor = [1, 0];
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->nestedCursor)->toBe([1, 0]);
+});
+
+it('defaults nestedCursor to [] when unserialising a legacy payload without nestedCursor', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: ['A']);
+
+    $legacyPayload = [
+        'pipelineId' => $manifest->pipelineId,
+        'pipelineName' => null,
+        'stepClasses' => ['A'],
+        'compensationMapping' => [],
+        'stepConditions' => [],
+        'stepConfigs' => [],
+        'currentStepIndex' => 0,
+        'completedSteps' => [],
+        'context' => null,
+        'failStrategy' => $manifest->failStrategy,
+        'failedStepClass' => null,
+        'failedStepIndex' => null,
+        'beforeEachHooks' => [],
+        'afterEachHooks' => [],
+        'onStepFailedHooks' => [],
+        'onSuccessCallback' => null,
+        'onFailureCallback' => null,
+        'onCompleteCallback' => null,
+    ];
+
+    $restored = (new ReflectionClass(PipelineManifest::class))->newInstanceWithoutConstructor();
+    $restored->__unserialize($legacyPayload);
+
+    expect($restored->nestedCursor)->toBe([]);
+});

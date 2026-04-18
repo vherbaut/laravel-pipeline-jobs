@@ -152,3 +152,87 @@ it('defaults failureException, failedStepClass, failedStepIndex to null', functi
         ->and($manifest->failedStepClass)->toBeNull()
         ->and($manifest->failedStepIndex)->toBeNull();
 });
+
+// --- Story 8.2: stepClassAt / stepConfigAt / conditionAt helpers --------------------------
+
+it('stepClassAt with empty path returns the current outer entry', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: ['A', 'B']);
+    $manifest->advanceStep();
+
+    expect($manifest->stepClassAt([]))->toBe('B');
+});
+
+it('stepClassAt navigates a one-level nested path', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: [
+        'A',
+        ['type' => 'nested', 'name' => null, 'steps' => ['X', 'Y']],
+    ]);
+
+    expect($manifest->stepClassAt([1, 0]))->toBe('X')
+        ->and($manifest->stepClassAt([1, 1]))->toBe('Y');
+});
+
+it('stepClassAt navigates two-level nested-inside-nested paths', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: [
+        [
+            'type' => 'nested',
+            'name' => null,
+            'steps' => [
+                'A',
+                ['type' => 'nested', 'name' => 'deep', 'steps' => ['B', 'C']],
+            ],
+        ],
+    ]);
+
+    expect($manifest->stepClassAt([0, 1, 0]))->toBe('B')
+        ->and($manifest->stepClassAt([0, 1, 1]))->toBe('C');
+});
+
+it('stepClassAt navigates parallel-inside-nested to the parallel sub-step by index', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: [
+        [
+            'type' => 'nested',
+            'name' => null,
+            'steps' => [
+                'A',
+                ['type' => 'parallel', 'classes' => ['P1', 'P2']],
+            ],
+        ],
+    ]);
+
+    expect($manifest->stepClassAt([0, 1, 0]))->toBe('P1')
+        ->and($manifest->stepClassAt([0, 1, 1]))->toBe('P2');
+});
+
+it('stepClassAt throws LogicException on out-of-bounds navigation', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: [
+        ['type' => 'nested', 'name' => null, 'steps' => ['A']],
+    ]);
+
+    expect(fn () => $manifest->stepClassAt([0, 5]))->toThrow(LogicException::class);
+});
+
+it('withRekeyedStepConfig returns a deep-cloned manifest with the replaced stepConfigs entry', function (): void {
+    $original = PipelineManifest::create(
+        stepClasses: ['A', ['type' => 'nested', 'name' => null, 'steps' => ['B']]],
+        stepConfigs: [
+            0 => ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+            1 => ['type' => 'nested', 'configs' => [
+                0 => ['queue' => 'inner-q', 'connection' => null, 'sync' => false, 'retry' => 3, 'backoff' => null, 'timeout' => null],
+            ]],
+        ],
+    );
+
+    $parallelShape = [
+        'type' => 'parallel',
+        'configs' => [
+            0 => ['queue' => 'p-q', 'connection' => null, 'sync' => false, 'retry' => 2, 'backoff' => null, 'timeout' => null],
+        ],
+    ];
+
+    $rekeyed = $original->withRekeyedStepConfig(1, $parallelShape);
+
+    expect($rekeyed)->not->toBe($original)
+        ->and($rekeyed->stepConfigs[1])->toBe($parallelShape)
+        ->and($original->stepConfigs[1]['type'])->toBe('nested');
+});

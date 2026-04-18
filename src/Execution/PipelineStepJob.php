@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Laravel\SerializableClosure\SerializableClosure;
+use LogicException;
 use ReflectionProperty;
 use Throwable;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
@@ -146,42 +147,43 @@ final class PipelineStepJob implements ShouldQueue
      */
     public function handle(): void
     {
-        $stepIndex = $this->manifest->currentStepIndex;
+        // Cursor-aware position resolution (Story 8.2). When the manifest's
+        // nestedCursor is non-empty, the previous wrapper left us inside a
+        // nested pipeline at that cursor path; navigate stepClassAt(cursor)
+        // to resolve the current entry. Otherwise the cursor-empty path
+        // resolves stepClasses[currentStepIndex] exactly as before Story 8.2.
+        [$stepClass, $outerIndex] = $this->resolveCurrentStepClass();
 
-        if (! array_key_exists($stepIndex, $this->manifest->stepClasses)) {
+        if ($stepClass === null) {
             return;
         }
 
-        $stepClass = $this->manifest->stepClasses[$stepIndex];
-
         if (is_array($stepClass)) {
-            // Parallel-group position: the manifest's declared type
+            $type = $stepClass['type'] ?? null;
+
+            if ($type === 'nested') {
+                /** @var array<int, string|array<string, mixed>> $innerSteps */
+                $innerSteps = $stepClass['steps'] ?? [];
+                $this->handleNestedPipeline($outerIndex, $innerSteps);
+
+                return;
+            }
+
+            // Parallel shape: the manifest's declared type
             // (`array{type: 'parallel', classes: array<int, string>}`)
-            // guarantees the shape, so no runtime check is needed. Hook
-            // firing is delegated to ParallelStepJob::handle() per
-            // sub-step (the outer wrapper fires no hooks for a parallel
-            // position).
-            $this->dispatchParallelBatch($stepIndex, $stepClass['classes']);
+            // guarantees the structure. For parallel-inside-nested the
+            // passed $groupIndex is cursor[0] (the outermost enclosing
+            // outer position) so Horizon batch names stay stable.
+            /** @var array<int, string> $parallelClasses */
+            $parallelClasses = $stepClass['classes'] ?? [];
+            $this->dispatchParallelBatch($outerIndex, $parallelClasses);
 
             return;
         }
 
         try {
-            if ($this->shouldSkip($stepIndex)) {
-                $this->manifest->advanceStep();
-
-                if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
-                    $this->dispatchNextStep();
-
-                    return;
-                }
-
-                // Story 6.2 AC #1 / AC #10: a conditionally-skipped last step
-                // still terminates the pipeline on this wrapper. Fire the
-                // terminal callbacks so queued-mode parity with SyncExecutor
-                // is preserved when the last step is skipped by when()/unless().
-                $this->firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
-                $this->firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+            if ($this->shouldSkipAtCurrentPosition()) {
+                $this->advanceAndContinueOrTerminate(null);
 
                 return;
             }
@@ -199,7 +201,7 @@ final class PipelineStepJob implements ShouldQueue
                 $this->manifest->context,
             );
 
-            $this->invokeStepWithRetry($job);
+            $this->invokeStepWithRetry($job, $this->resolveCurrentConfig());
 
             // Story 6.1 Task 6.4: afterEach fires INSIDE the try block so a
             // throwing afterEach is caught by the standard failure path
@@ -210,10 +212,21 @@ final class PipelineStepJob implements ShouldQueue
                 $this->manifest->context,
             );
         } catch (Throwable $exception) {
+            // Collapse double-wrapping (deferred-work.md:25): when an inner
+            // step is itself a pipeline that threw StepExecutionFailed, unwrap
+            // to its underlying cause so the outer frame wraps ONCE.
+            $cause = $exception instanceof StepExecutionFailed
+                ? ($exception->getPrevious() ?? $exception)
+                : $exception;
+
             // Last-failure-wins: subsequent failures overwrite the recorded fields.
-            $this->manifest->failureException = $exception;
+            // For cursor-resolved failures, failedStepIndex records the
+            // outermost nested-group position so downstream diagnostics
+            // (including CompensationStepJob's manifest inspection) point at
+            // the failing group rather than at the inner index.
+            $this->manifest->failureException = $cause;
             $this->manifest->failedStepClass = $stepClass;
-            $this->manifest->failedStepIndex = $stepIndex;
+            $this->manifest->failedStepIndex = $outerIndex;
 
             // Story 6.1 AC #3/#7/#8/#9: onStepFailed fires BEFORE FailStrategy
             // branching. A throwing onStepFailed propagates and bypasses the
@@ -224,69 +237,54 @@ final class PipelineStepJob implements ShouldQueue
                 $this->manifest->onStepFailedHooks,
                 StepDefinition::fromJobClass($stepClass),
                 $this->manifest->context,
-                $exception,
+                $cause,
             );
 
             if ($this->manifest->failStrategy === FailStrategy::SkipAndContinue) {
                 Log::warning('Pipeline step skipped under SkipAndContinue', [
                     'pipelineId' => $this->manifest->pipelineId,
                     'stepClass' => $stepClass,
-                    'stepIndex' => $stepIndex,
-                    'exception' => $exception->getMessage(),
+                    'stepIndex' => $outerIndex,
+                    'nestedCursor' => $this->manifest->nestedCursor,
+                    'exception' => $cause->getMessage(),
                 ]);
-
-                $this->manifest->advanceStep();
 
                 // NFR19: clear the non-serializable Throwable before dispatching
                 // the next wrapper job so the downstream queue payload stays
                 // serializable even outside the structural __serialize guard.
                 $this->manifest->failureException = null;
 
-                if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
-                    try {
-                        // dispatch_sync may also throw here under Story 7.1's
-                        // sync-step branch; the same catch block handles both
-                        // because dispatch_sync surfaces exceptions synchronously.
-                        $this->dispatchNextStep();
-                    } catch (Throwable $dispatchException) {
-                        // If dispatch() itself throws (queue driver unavailable,
-                        // serialization failure), Laravel's default handling lands
-                        // the wrapper in failed_jobs. Log the dispatch-site context
-                        // before rethrow so operators can attribute the failure to
-                        // the dispatch, not to the already-skipped step.
-                        Log::error('Pipeline next-step dispatch failed under SkipAndContinue', [
-                            'pipelineId' => $this->manifest->pipelineId,
-                            'nextStepIndex' => $this->manifest->currentStepIndex,
-                            'skippedStepClass' => $stepClass,
-                            'exception' => $dispatchException->getMessage(),
-                        ]);
+                try {
+                    $this->advanceAndContinueOrTerminate(null);
+                } catch (Throwable $dispatchException) {
+                    Log::error('Pipeline next-step dispatch failed under SkipAndContinue', [
+                        'pipelineId' => $this->manifest->pipelineId,
+                        'nextOuterIndex' => $this->manifest->currentStepIndex,
+                        'nestedCursor' => $this->manifest->nestedCursor,
+                        'skippedStepClass' => $stepClass,
+                        'exception' => $dispatchException->getMessage(),
+                    ]);
 
-                        throw $dispatchException;
-                    }
-
-                    return;
+                    throw $dispatchException;
                 }
-
-                // Story 6.2 AC #1 / AC #10: SkipAndContinue on the last step
-                // still terminates the pipeline on this wrapper with a
-                // "success" outcome (the strategy converts intermediate
-                // failures into continuations). Fire terminal callbacks so
-                // queued-mode parity with SyncExecutor is preserved.
-                $this->firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
-                $this->firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
 
                 return;
             }
 
             if ($this->manifest->failStrategy === FailStrategy::StopAndCompensate) {
+                // Belt-and-suspenders (Story 8.2 Task 7.7): clear the nested
+                // cursor before compensation dispatch so the chained
+                // CompensationStepJob payloads do not carry stale cursor
+                // state into failed_jobs records.
+                $this->manifest->nestedCursor = [];
                 $this->dispatchCompensationChain();
             }
 
             Log::error('Pipeline step failed', [
                 'pipelineId' => $this->manifest->pipelineId,
-                'currentStepIndex' => $stepIndex,
+                'currentStepIndex' => $outerIndex,
                 'stepClass' => $stepClass,
-                'exception' => $exception->getMessage(),
+                'exception' => $cause->getMessage(),
             ]);
 
             // Story 6.2 AC #2, #7, #11: pipeline-level onFailure fires AFTER
@@ -299,84 +297,133 @@ final class PipelineStepJob implements ShouldQueue
                 $this->firePipelineCallback(
                     $this->manifest->onFailureCallback,
                     $this->manifest->context,
-                    $exception,
+                    $cause,
                 );
             } catch (Throwable $callbackException) {
-                // AC #5 queued parity: wrap the callback exception in
-                // StepExecutionFailed so failed_jobs carries the same
-                // envelope as SyncExecutor / RecordingExecutor. The
-                // original step exception is preserved on
-                // StepExecutionFailed::$originalStepException.
                 throw StepExecutionFailed::forCallbackFailure(
                     $this->manifest->pipelineId,
-                    $this->manifest->currentStepIndex,
+                    $outerIndex,
                     $stepClass,
                     $callbackException,
-                    $exception,
+                    $cause,
                 );
             }
 
             try {
                 $this->firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
             } catch (Throwable $callbackException) {
-                // AC #12 queued: a throwing onComplete replaces the
-                // originally-intended rethrow; wrap uniformly so
-                // failed_jobs carries the StepExecutionFailed envelope
-                // with originalStepException preserved.
                 throw StepExecutionFailed::forCallbackFailure(
                     $this->manifest->pipelineId,
-                    $this->manifest->currentStepIndex,
+                    $outerIndex,
                     $stepClass,
                     $callbackException,
-                    $exception,
+                    $cause,
                 );
             }
 
-            throw $exception;
+            throw $cause;
         }
 
-        $this->manifest->markStepCompleted($stepClass);
-        $this->manifest->advanceStep();
+        $this->advanceAndContinueOrTerminate($stepClass);
+    }
 
-        // AC #6: a successful step under SkipAndContinue clears any failure
-        // recorded by a previously skipped step. No-op under StopImmediately /
-        // StopAndCompensate because those paths never reach this success tail
-        // with failure fields set.
-        $this->manifest->failureException = null;
-        $this->manifest->failedStepClass = null;
-        $this->manifest->failedStepIndex = null;
+    /**
+     * Resolve the current step class and the outer group index for observability.
+     *
+     * When the manifest's nestedCursor is non-empty, navigates via
+     * PipelineManifest::stepClassAt() and returns [$resolvedClass, cursor[0]].
+     * When the cursor is empty, falls back to stepClasses[currentStepIndex]
+     * and returns [$classAtIndex, currentStepIndex]. Returns [null, 0] when
+     * the manifest is exhausted (currentStepIndex past the last outer
+     * position AND cursor is empty); callers treat that as a no-op.
+     *
+     * Cursor navigation failures (LogicException from stepClassAt) clear
+     * the cursor and fall through to outer-navigation: a defensive
+     * recovery for malformed or legacy cursor payloads.
+     *
+     * @return array{0: string|array<string, mixed>|null, 1: int} Tuple of resolved entry (class-string, discriminator-tagged shape, or null) and the outermost index used for failure observability.
+     */
+    private function resolveCurrentStepClass(): array
+    {
+        if ($this->manifest->nestedCursor !== []) {
+            try {
+                $resolved = $this->manifest->stepClassAt($this->manifest->nestedCursor);
 
-        if ($this->manifest->currentStepIndex < count($this->manifest->stepClasses)) {
-            $this->dispatchNextStep();
+                return [$resolved, $this->manifest->nestedCursor[0]];
+            } catch (LogicException) {
+                // Corrupt or legacy cursor: clear and fall through to outer navigation.
+                $this->manifest->nestedCursor = [];
+            }
+        }
+
+        $stepIndex = $this->manifest->currentStepIndex;
+
+        if (! array_key_exists($stepIndex, $this->manifest->stepClasses)) {
+            return [null, $stepIndex];
+        }
+
+        return [$this->manifest->stepClasses[$stepIndex], $stepIndex];
+    }
+
+    /**
+     * Initialize (or descend into) the nested cursor and dispatch the first inner step.
+     *
+     * Called from handle() when the current position resolves to a nested
+     * shape. When the manifest's cursor is empty, initializes it to
+     * [$groupIndex, 0]; when non-empty (mid-execution descent into a
+     * nested-inside-nested shape), appends a fresh 0 for the new inner
+     * level. Dispatches a new PipelineStepJob wrapper; the fresh worker's
+     * handle() resolves the cursor position and executes the first inner step.
+     *
+     * An empty $innerSteps array short-circuits to an immediate advance
+     * (defensive fallback: NestedPipeline::fromBuilder() builds the inner
+     * definition eagerly, which rejects empty steps, so this path is only
+     * reached when a hand-crafted manifest is malformed).
+     *
+     * @param int $groupIndex The outer position of the nested group in the pipeline.
+     * @param array<int, string|array<string, mixed>> $innerSteps Inner-step entries of the nested group.
+     *
+     * @return void
+     */
+    private function handleNestedPipeline(int $groupIndex, array $innerSteps): void
+    {
+        if ($innerSteps === []) {
+            $this->advanceAndContinueOrTerminate(null);
 
             return;
         }
 
-        // Story 6.2 AC #1, #7: pipeline terminates on this wrapper (last step
-        // completed). onSuccess fires first, then onComplete. Callback throws
-        // mark the wrapper failed in Laravel's queue (acceptable per AC #12
-        // queued-mode clause).
-        $this->firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
-        $this->firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+        if ($this->manifest->nestedCursor === []) {
+            $this->manifest->nestedCursor = [$groupIndex, 0];
+        } else {
+            $this->manifest->nestedCursor[] = 0;
+        }
+
+        $this->dispatchAtCurrentPosition();
     }
 
     /**
-     * Decide whether the step at the given index should be skipped based on its condition entry.
+     * Decide whether the step at the current cursor-or-outer position should be skipped.
      *
-     * Mirrors SyncExecutor::shouldSkipStep(). Returns false when no
-     * condition is registered for the index; otherwise unwraps the
-     * SerializableClosure and applies the `negated` flag. Called from
-     * inside the surrounding try/catch so a throwing closure is logged
-     * via Log::error('Pipeline step failed', ...) and rethrown for
-     * Laravel's queue failure handling to fire.
-     *
-     * @param int $stepIndex The zero-based index of the step being evaluated.
+     * Uses PipelineManifest::conditionAt() when the cursor is non-empty
+     * (returns the resolved flat condition entry for the cursor path, or
+     * null for unconditional / group-shape entries). Falls back to the
+     * outer-index lookup when the cursor is empty. Mirrors
+     * SyncExecutor::shouldSkipStep() semantics: closure is unwrapped via
+     * getClosure(), result is cast to bool, and the `negated` flag is
+     * applied. A throwing closure propagates so the outer try/catch in
+     * handle() converts it to the standard failure path.
      *
      * @return bool True when the step must be skipped, false when it should run.
      */
-    private function shouldSkip(int $stepIndex): bool
+    private function shouldSkipAtCurrentPosition(): bool
     {
-        $entry = $this->manifest->stepConditions[$stepIndex] ?? null;
+        if ($this->manifest->nestedCursor !== []) {
+            $entry = $this->manifest->conditionAt($this->manifest->nestedCursor);
+        } else {
+            $outer = $this->manifest->stepConditions[$this->manifest->currentStepIndex] ?? null;
+            $entry = (is_array($outer) && ! isset($outer['type'])) ? $outer : null;
+        }
 
         if ($entry === null) {
             return false;
@@ -390,15 +437,212 @@ final class PipelineStepJob implements ShouldQueue
     }
 
     /**
+     * Resolve the flat per-step config at the current cursor-or-outer position.
+     *
+     * Uses PipelineManifest::stepConfigAt() when the cursor is non-empty,
+     * else falls back to stepConfigs[currentStepIndex]. Group-shape entries
+     * (parallel/nested at the resolved level) or missing entries degrade to
+     * the default all-null config shape so the retry loop has a predictable
+     * fast-path for legacy or hand-built manifests.
+     *
+     * @return array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int} The resolved flat config.
+     */
+    private function resolveCurrentConfig(): array
+    {
+        $default = ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
+
+        if ($this->manifest->nestedCursor !== []) {
+            $entry = $this->manifest->stepConfigAt($this->manifest->nestedCursor);
+        } else {
+            $entry = $this->manifest->stepConfigs[$this->manifest->currentStepIndex] ?? $default;
+        }
+
+        if (isset($entry['type']) || $entry === []) {
+            return $default;
+        }
+
+        /** @var array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int} $entry */
+        return $entry;
+    }
+
+    /**
+     * Mark the completed step (if any), advance to the next position, and dispatch or terminate.
+     *
+     * Single exit point for both the success path and the skip path. When a
+     * step completed successfully $completedStepClass is its class-string;
+     * when the step was skipped (condition, SkipAndContinue recovery), pass
+     * null. Clears the three last-failure fields on successful progress so
+     * a SkipAndContinue-recovered failure does not linger. Delegates to
+     * advanceCursorOrOuter() for cursor/outer navigation, then either
+     * dispatches the next wrapper via dispatchAtCurrentPosition() OR fires
+     * the terminal onSuccess/onComplete callbacks when the pipeline has
+     * exhausted all positions.
+     *
+     * @param string|null $completedStepClass Class-string of the just-completed step, or null for a skipped step.
+     *
+     * @return void
+     */
+    private function advanceAndContinueOrTerminate(?string $completedStepClass): void
+    {
+        if ($completedStepClass !== null) {
+            $this->manifest->markStepCompleted($completedStepClass);
+
+            $this->manifest->failureException = null;
+            $this->manifest->failedStepClass = null;
+            $this->manifest->failedStepIndex = null;
+        }
+
+        self::advanceCursorOrOuter($this->manifest);
+
+        if (self::hasMorePositions($this->manifest)) {
+            $this->dispatchAtCurrentPosition();
+
+            return;
+        }
+
+        $this->firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
+        $this->firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+    }
+
+    /**
+     * Advance the manifest to the next position (cursor or outer).
+     *
+     * When the cursor has a single element, the nested group has just
+     * completed: clear the cursor and advance currentStepIndex so the outer
+     * pipeline progresses. When the cursor has multiple elements, increment
+     * the last element and test in-bounds via stepClassAt(); pop a level on
+     * out-of-bounds and repeat until an in-bounds position is found or the
+     * cursor reduces to a single element. When the cursor starts empty,
+     * simply advance currentStepIndex.
+     *
+     * Made static so the parallel batch's fan-in closure
+     * (finalizeParallelBatch) can reuse the same advancement logic without
+     * a PipelineStepJob instance.
+     *
+     * @param PipelineManifest $manifest The manifest whose cursor / currentStepIndex is advanced in place.
+     *
+     * @return void
+     */
+    public static function advanceCursorOrOuter(PipelineManifest $manifest): void
+    {
+        while ($manifest->nestedCursor !== []) {
+            $last = count($manifest->nestedCursor) - 1;
+
+            if ($last === 0) {
+                // Exiting the outermost nested group: clear the cursor and
+                // bump the outer position past the enclosing group.
+                $manifest->nestedCursor = [];
+                $manifest->advanceStep();
+
+                return;
+            }
+
+            $manifest->nestedCursor[$last]++;
+
+            try {
+                $manifest->stepClassAt($manifest->nestedCursor);
+
+                return;
+            } catch (LogicException) {
+                array_pop($manifest->nestedCursor);
+                // Continue the while loop to try the parent level's next position.
+            }
+        }
+
+        $manifest->advanceStep();
+    }
+
+    /**
+     * Decide whether the manifest has more positions to execute.
+     *
+     * Returns true when the nested cursor is non-empty (inside a nested
+     * group: the cursor position resolves a valid inner step) OR when the
+     * outer currentStepIndex is strictly less than the outer step count.
+     *
+     * @param PipelineManifest $manifest The manifest to inspect.
+     *
+     * @return bool True when the pipeline has at least one more position to dispatch.
+     */
+    public static function hasMorePositions(PipelineManifest $manifest): bool
+    {
+        return $manifest->nestedCursor !== []
+            || $manifest->currentStepIndex < count($manifest->stepClasses);
+    }
+
+    /**
+     * Dispatch a fresh PipelineStepJob wrapper at the current cursor-or-outer position.
+     *
+     * Resolves the flat config via PipelineManifest::stepConfigAt() when the
+     * cursor is non-empty or stepConfigs[currentStepIndex] otherwise. When
+     * the resolved entry is a group-shape (parallel/nested at the resolved
+     * level), no per-wrapper queue/connection/timeout overrides apply
+     * because the fresh handle() will detect the shape and branch
+     * accordingly. For flat-config positions, applies queue / connection /
+     * timeout / sync overrides before dispatching. Used by both the
+     * instance-level success/skip path and the static parallel fan-in.
+     *
+     * @return void
+     */
+    private function dispatchAtCurrentPosition(): void
+    {
+        self::dispatchWrapperFor($this->manifest);
+    }
+
+    /**
+     * Dispatch a fresh wrapper for a manifest (static so the batch fan-in can reuse).
+     *
+     * Same branching logic as dispatchAtCurrentPosition() but operates on an
+     * arbitrary manifest. The cursor-or-outer position is derived from the
+     * manifest's own state.
+     *
+     * @param PipelineManifest $manifest The manifest carrying the cursor / outer index / configs for the upcoming step.
+     *
+     * @return void
+     */
+    public static function dispatchWrapperFor(PipelineManifest $manifest): void
+    {
+        if ($manifest->nestedCursor !== []) {
+            $config = $manifest->stepConfigAt($manifest->nestedCursor);
+        } else {
+            $config = $manifest->stepConfigs[$manifest->currentStepIndex] ?? [];
+        }
+
+        $job = new self($manifest);
+
+        if (! isset($config['type']) && $config !== []) {
+            if (($config['queue'] ?? null) !== null) {
+                $job->onQueue($config['queue']);
+            }
+
+            if (($config['connection'] ?? null) !== null) {
+                $job->onConnection($config['connection']);
+            }
+
+            if (($config['timeout'] ?? null) !== null) {
+                $job->timeout = $config['timeout'];
+            }
+
+            if ((bool) ($config['sync'] ?? false)) {
+                dispatch_sync($job);
+
+                return;
+            }
+        }
+
+        dispatch($job);
+    }
+
+    /**
      * Invoke the step's handle() method with an in-process retry loop.
      *
-     * Reads the per-step configuration from
-     * `$this->manifest->stepConfigs[$this->manifest->currentStepIndex]`.
-     * Fast path: when retry is null or zero, `app()->call([$job, 'handle'])`
-     * runs once — zero retry-loop overhead when retry is unset. Retry path:
-     * `retry + 1` attempts with `sleep($backoff)` between non-final attempts.
-     * The final attempt's exception propagates to the outer catch where
-     * FailStrategy branching takes over.
+     * Accepts the pre-resolved per-step configuration (cursor-aware when
+     * called from handle()'s cursor-or-outer flow, or the outer-index
+     * lookup when the cursor is empty). Fast path: when retry is null or
+     * zero, `app()->call([$job, 'handle'])` runs once — zero retry-loop
+     * overhead when retry is unset. Retry path: `retry + 1` attempts with
+     * `sleep($backoff)` between non-final attempts. The final attempt's
+     * exception propagates to the outer catch where FailStrategy branching
+     * takes over.
      *
      * Instance-reuse contract: the step `$job` is resolved ONCE by the
      * caller (`app()->make($stepClass)`) before this helper runs; the SAME
@@ -417,20 +661,18 @@ final class PipelineStepJob implements ShouldQueue
      * `SIGALRM` termination mid-retry — the in-process loop does not
      * protect against timeout.
      *
-     * The `timeout` value from the config is intentionally NOT consulted
-     * here; it is applied at dispatch time on the wrapper's public
-     * `$timeout` property, which Laravel's worker reads via `pcntl_alarm()`.
+     * The `timeout` key of the config is intentionally NOT consulted here;
+     * it is applied at dispatch time on the wrapper's public `$timeout`
+     * property, which Laravel's worker reads via `pcntl_alarm()`.
      *
      * @param object $job The resolved step job instance (already has manifest injected when applicable).
+     * @param array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int} $config The pre-resolved per-step config; retry/backoff drive the loop, timeout is ignored here.
      * @return void
      *
      * @throws Throwable The final attempt's exception when the retry loop exhausts.
      */
-    private function invokeStepWithRetry(object $job): void
+    private function invokeStepWithRetry(object $job, array $config): void
     {
-        $config = $this->manifest->stepConfigs[$this->manifest->currentStepIndex]
-            ?? ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
-
         $retry = $config['retry'] ?? null;
 
         if ($retry === null || $retry === 0) {
@@ -460,84 +702,6 @@ final class PipelineStepJob implements ShouldQueue
                 }
             }
         }
-    }
-
-    /**
-     * Dispatch the next PipelineStepJob wrapper, applying per-step config.
-     *
-     * Resolves `$this->manifest->stepConfigs[$this->manifest->currentStepIndex]`
-     * which, by the time this helper is called, has been advanced by the
-     * caller to point at the UPCOMING step's config index. Applies the same
-     * branching logic as QueuedExecutor::dispatchFirstStep():
-     *
-     * - `sync === true` → `dispatch_sync()`: runs the next wrapper
-     *   synchronously in the current worker's process; `handle()` does not
-     *   return until the inline wrapper fully executes. Exceptions propagate
-     *   synchronously. When a `timeout` is declared, it is still assigned on
-     *   the wrapper (inert observationally because `dispatch_sync` does not
-     *   install a `pcntl_alarm`) so test assertions observe the declared
-     *   value on both branches symmetrically.
-     * - `sync === false` with explicit queue / connection → the job is
-     *   configured via `onQueue()` / `onConnection()` before `dispatch()`
-     *   is called.
-     * - `sync === false` with null queue / connection → no-op mutations.
-     *
-     * The `timeout` config key, when non-null, is assigned to the wrapper's
-     * public `$timeout` property (inherited from Laravel's Queueable trait).
-     * Laravel's queue worker reads the property at job pickup and calls
-     * `pcntl_alarm($timeout)` before invoking `handle()`; on SIGALRM the
-     * worker is killed and the wrapper lands in `failed_jobs`. The
-     * wrapper's `$tries` remains locked to 1 regardless of the per-step
-     * retry config (retry is delivered via the in-process loop in
-     * `invokeStepWithRetry()`, not via Laravel's wrapper-level retry).
-     *
-     * @return void
-     */
-    private function dispatchNextStep(): void
-    {
-        $config = $this->manifest->stepConfigs[$this->manifest->currentStepIndex] ?? null;
-
-        // Parallel-group positions carry a nested config shape and no
-        // per-wrapper queue/connection/timeout: the outer wrapper's sole
-        // responsibility is to detect the parallel shape in handle() and
-        // fan out via dispatchParallelBatch(). Dispatch as a plain wrapper.
-        if (is_array($config) && ($config['type'] ?? null) === 'parallel') {
-            dispatch(new self($this->manifest));
-
-            return;
-        }
-
-        $config = is_array($config)
-            ? $config
-            : ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
-
-        if ((bool) ($config['sync'] ?? false)) {
-            $job = new self($this->manifest);
-
-            if (($config['timeout'] ?? null) !== null) {
-                $job->timeout = $config['timeout'];
-            }
-
-            dispatch_sync($job);
-
-            return;
-        }
-
-        $job = new self($this->manifest);
-
-        if (($config['queue'] ?? null) !== null) {
-            $job->onQueue($config['queue']);
-        }
-
-        if (($config['connection'] ?? null) !== null) {
-            $job->onConnection($config['connection']);
-        }
-
-        if (($config['timeout'] ?? null) !== null) {
-            $job->timeout = $config['timeout'];
-        }
-
-        dispatch($job);
     }
 
     /**
@@ -658,11 +822,38 @@ final class PipelineStepJob implements ShouldQueue
             ? null
             : unserialize(serialize($this->manifest->context));
 
+        // Resolve the effective parallel-shape config entry once. For a
+        // top-level parallel group this is stepConfigs[$groupIndex]. For a
+        // parallel group nested inside a NestedPipeline the enclosing entry
+        // is a nested shape whose inner configs[$innerIndex] holds the
+        // parallel shape; stepConfigAt() navigates the cursor path to fetch
+        // it. Missing or malformed entries degrade to null so the downstream
+        // lookup falls back to the default null-config shape.
+        $parallelShape = $this->manifest->nestedCursor !== []
+            ? $this->manifest->stepConfigAt($this->manifest->nestedCursor)
+            : ($this->manifest->stepConfigs[$groupIndex] ?? null);
+
+        if (! is_array($parallelShape) || ($parallelShape['type'] ?? null) !== 'parallel') {
+            $parallelShape = null;
+        }
+
         $jobs = [];
 
         foreach ($subStepClasses as $subIndex => $subStepClass) {
-            /** @var PipelineManifest $clonedManifest */
-            $clonedManifest = unserialize(serialize($this->manifest));
+            // Inject the resolved parallel shape at the cloned manifest's
+            // $groupIndex slot so ParallelStepJob::resolveSubStepConfig() (a
+            // forbidden-edit file) finds the per-sub-step config entries
+            // under stepConfigs[$groupIndex]['configs'][$subIndex] even for
+            // parallel-inside-nested, where the real nested tree carries it
+            // at stepConfigs[cursor[0]]['configs'][cursor[1]]. Re-keying
+            // goes through withRekeyedStepConfig() because stepConfigs is
+            // readonly and can only be assigned via __unserialize.
+            if ($parallelShape !== null && $this->manifest->nestedCursor !== []) {
+                $clonedManifest = $this->manifest->withRekeyedStepConfig($groupIndex, $parallelShape);
+            } else {
+                /** @var PipelineManifest $clonedManifest */
+                $clonedManifest = unserialize(serialize($this->manifest));
+            }
 
             $wrapper = new ParallelStepJob(
                 manifest: $clonedManifest,
@@ -671,7 +862,7 @@ final class PipelineStepJob implements ShouldQueue
                 stepClass: $subStepClass,
             );
 
-            $config = $this->resolveParallelSubConfig($groupIndex, $subIndex);
+            $config = $this->resolveParallelSubConfigFrom($parallelShape, $subIndex);
 
             if ($config['queue'] !== null) {
                 $wrapper->onQueue($config['queue']);
@@ -862,6 +1053,10 @@ final class PipelineStepJob implements ShouldQueue
             ]);
 
             if ($strategy === FailStrategy::StopAndCompensate) {
+                // Belt-and-suspenders (Story 8.2 Task 7.7): clear the nested
+                // cursor before the compensation chain is serialized so
+                // failed_jobs records do not carry stale cursor state.
+                $manifest->nestedCursor = [];
                 self::dispatchCompensationChainFor($manifest);
             }
 
@@ -899,39 +1094,22 @@ final class PipelineStepJob implements ShouldQueue
         }
 
         // No terminal failure: advance past the group before dispatching
-        // the next step or firing the success tail. Placing advanceStep()
+        // the next step or firing the success tail. Placing advancement
         // AFTER the hasFailures() branch preserves the "failed group stays
         // at its position" invariant that mirrors the sync path (failures
         // leave currentStepIndex pointing at the failing group for
         // observability / downstream diagnostics).
-        $manifest->advanceStep();
+        //
+        // Cursor-aware advancement (Story 8.2): when the parallel group is
+        // nested inside a wrapping nested pipeline, the manifest carries a
+        // non-empty nestedCursor pointing at the parallel-shape entry's
+        // inner position. advanceCursorOrOuter() increments the inner index
+        // (or pops up one level when the inner list is exhausted) instead
+        // of advancing currentStepIndex past the outermost nested group.
+        self::advanceCursorOrOuter($manifest);
 
-        if ($manifest->currentStepIndex < count($manifest->stepClasses)) {
-            $nextJob = new self($manifest);
-
-            $nextConfig = $manifest->stepConfigs[$manifest->currentStepIndex] ?? null;
-
-            if (is_array($nextConfig) && ! isset($nextConfig['type'])) {
-                if (($nextConfig['queue'] ?? null) !== null) {
-                    $nextJob->onQueue($nextConfig['queue']);
-                }
-
-                if (($nextConfig['connection'] ?? null) !== null) {
-                    $nextJob->onConnection($nextConfig['connection']);
-                }
-
-                if (($nextConfig['timeout'] ?? null) !== null) {
-                    $nextJob->timeout = $nextConfig['timeout'];
-                }
-
-                if ((bool) $nextConfig['sync']) {
-                    dispatch_sync($nextJob);
-
-                    return;
-                }
-            }
-
-            dispatch($nextJob);
+        if (self::hasMorePositions($manifest)) {
+            self::dispatchWrapperFor($manifest);
 
             return;
         }
@@ -994,29 +1172,31 @@ final class PipelineStepJob implements ShouldQueue
     }
 
     /**
-     * Resolve the per-sub-step config entry inside a parallel group.
+     * Resolve the per-sub-step config entry from a pre-resolved parallel shape.
      *
-     * Reads $this->manifest->stepConfigs[$groupIndex]['configs'][$subIndex]
-     * and falls back to the default null-config shape when missing or
-     * malformed. Defensive against hand-built manifests that skip the
-     * PipelineBuilder's nested-shape generation.
+     * Reads `$parallelShape['configs'][$subIndex]` and falls back to the
+     * default null-config shape when the shape is null, malformed, or missing
+     * the requested sub-step. Defensive against hand-built manifests that
+     * skip the PipelineBuilder's nested-shape generation as well as against
+     * parallel-inside-nested entries where the caller (dispatchParallelBatch)
+     * navigates the nested tree via stepConfigAt() before calling this
+     * helper.
      *
-     * @param int $groupIndex The outer position of the parallel group.
+     * @param array<string, mixed>|null $parallelShape The resolved parallel shape (already navigated via stepConfigAt when inside a nested group).
      * @param int $subIndex The zero-based declaration-order index of the sub-step.
      *
      * @return array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int} The resolved per-sub-step configuration.
      */
-    private function resolveParallelSubConfig(int $groupIndex, int $subIndex): array
+    private function resolveParallelSubConfigFrom(?array $parallelShape, int $subIndex): array
     {
         $default = ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null];
-        $groupEntry = $this->manifest->stepConfigs[$groupIndex] ?? null;
 
-        if (! is_array($groupEntry) || ($groupEntry['type'] ?? null) !== 'parallel') {
+        if ($parallelShape === null || ($parallelShape['type'] ?? null) !== 'parallel') {
             return $default;
         }
 
         /** @var array<int, array{queue: ?string, connection: ?string, sync: bool, retry: ?int, backoff: ?int, timeout: ?int}> $configs */
-        $configs = $groupEntry['configs'];
+        $configs = $parallelShape['configs'] ?? [];
 
         return $configs[$subIndex] ?? $default;
     }

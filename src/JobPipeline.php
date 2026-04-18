@@ -76,6 +76,38 @@ final class JobPipeline
     }
 
     /**
+     * Wrap a pipeline as a nested sub-pipeline for inline use inside another pipeline definition.
+     *
+     * Usage: `Pipeline::make([A::class, JobPipeline::nest($subPipeline), D::class])`.
+     * Accepts either a PipelineBuilder (snapshotted eagerly via ->build())
+     * or a pre-built PipelineDefinition. The returned NestedPipeline slots
+     * into the outer pipeline's $steps array as a single logical position;
+     * inner steps execute sequentially with a shared PipelineContext and
+     * their completed class names flatten onto the outer $completedSteps
+     * list so saga compensation operates over one merged reverse-order chain.
+     *
+     * This is a VALUE CONSTRUCTOR, not an execution verb: the resulting
+     * wrapper is consumed by PipelineBuilder / JobPipeline::make() and does
+     * not itself trigger dispatch. For fluent-builder usage prefer
+     * PipelineBuilder::nest() (same arguments, identical semantics).
+     *
+     * @param PipelineBuilder|PipelineDefinition $pipeline Inner pipeline to wrap; builder form is built eagerly at wrap time.
+     * @param string|null $name Optional user-visible sub-pipeline name for observability; defaults to null.
+     *
+     * @return NestedPipeline A value object wrapping the inner pipeline as a single outer position.
+     *
+     * @throws InvalidPipelineDefinition Propagated from PipelineBuilder::build() when called with a builder that has no steps.
+     */
+    public static function nest(PipelineBuilder|PipelineDefinition $pipeline, ?string $name = null): NestedPipeline
+    {
+        if ($pipeline instanceof PipelineBuilder) {
+            return NestedPipeline::fromBuilder($pipeline, $name);
+        }
+
+        return NestedPipeline::fromDefinition($pipeline, $name);
+    }
+
+    /**
      * Register a pipeline as a Laravel event listener in a single call.
      *
      * Equivalent to: make($jobs)->send($send)->toListener() + Event::listen($eventClass, $listener).

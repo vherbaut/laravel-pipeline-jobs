@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\JobPipeline;
+use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -204,4 +206,96 @@ it('compensationMapping includes sub-step compensations from a parallel group', 
         ->and($mapping)->toHaveKey('App\\Jobs\\SubA')
         ->and($mapping['App\\Jobs\\SubA'])->toBe('App\\Jobs\\CompensateSubA')
         ->and($mapping)->not->toHaveKey('App\\Jobs\\SubB');
+});
+
+// --- Story 8.2: NestedPipeline integration -------------------------------------------------
+
+it('stepCount counts a nested group as a single outer position', function (): void {
+    $inner = JobPipeline::make(['App\\Jobs\\InnerA', 'App\\Jobs\\InnerB', 'App\\Jobs\\InnerC']);
+    $nested = NestedPipeline::fromBuilder($inner);
+
+    $definition = new PipelineDefinition(
+        steps: [
+            StepDefinition::fromJobClass('App\\Jobs\\OuterA'),
+            $nested,
+            StepDefinition::fromJobClass('App\\Jobs\\OuterB'),
+        ],
+    );
+
+    expect($definition->stepCount())->toBe(3);
+});
+
+it('flatStepCount expands a nested group to its recursive inner step count', function (): void {
+    $inner = JobPipeline::make(['App\\Jobs\\InnerA', 'App\\Jobs\\InnerB']);
+    $nested = NestedPipeline::fromBuilder($inner);
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass('App\\Jobs\\OuterA'), $nested],
+    );
+
+    expect($definition->flatStepCount())->toBe(3);
+});
+
+it('flatStepCount expands a nested+parallel mix', function (): void {
+    $inner = JobPipeline::make(['App\\Jobs\\InnerA'])
+        ->parallel(['App\\Jobs\\InnerP1', 'App\\Jobs\\InnerP2']);
+    $nested = NestedPipeline::fromBuilder($inner);
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass('App\\Jobs\\Outer'), $nested],
+    );
+
+    // Outer(1) + inner InnerA(1) + parallel(2) → 4
+    expect($definition->flatStepCount())->toBe(4);
+});
+
+it('flatStepCount expands three-level nested groups transitively', function (): void {
+    $innermost = JobPipeline::make(['App\\Jobs\\DeepA', 'App\\Jobs\\DeepB']);
+    $middle = JobPipeline::make(['App\\Jobs\\MidA'])->nest($innermost);
+    $outerNested = NestedPipeline::fromBuilder($middle);
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass('App\\Jobs\\Top'), $outerNested],
+    );
+
+    // Top(1) + MidA(1) + DeepA(1) + DeepB(1) → 4
+    expect($definition->flatStepCount())->toBe(4);
+});
+
+it('compensationMapping merges inner-and-outer compensations across nested groups', function (): void {
+    $inner = JobPipeline::make([
+        'App\\Jobs\\InnerA',
+    ])->compensateWith('App\\Jobs\\InnerACompensate');
+
+    $nested = NestedPipeline::fromBuilder($inner);
+
+    $outerStep = StepDefinition::fromJobClass('App\\Jobs\\OuterA')
+        ->withCompensation('App\\Jobs\\OuterACompensate');
+
+    $definition = new PipelineDefinition(steps: [$outerStep, $nested]);
+
+    $mapping = $definition->compensationMapping();
+
+    expect($mapping)->toBe([
+        'App\\Jobs\\OuterA' => 'App\\Jobs\\OuterACompensate',
+        'App\\Jobs\\InnerA' => 'App\\Jobs\\InnerACompensate',
+    ]);
+});
+
+it('compensationMapping later-key-wins when an inner entry duplicates an outer class', function (): void {
+    $inner = JobPipeline::make([
+        'App\\Jobs\\SharedJob',
+    ])->compensateWith('App\\Jobs\\InnerSharedCompensate');
+
+    $nested = NestedPipeline::fromBuilder($inner);
+
+    $outerShared = StepDefinition::fromJobClass('App\\Jobs\\SharedJob')
+        ->withCompensation('App\\Jobs\\OuterSharedCompensate');
+
+    $definition = new PipelineDefinition(steps: [$outerShared, $nested]);
+
+    // array_merge with later-key-wins: the nested's mapping is merged LAST, so inner wins.
+    expect($definition->compensationMapping())->toBe([
+        'App\\Jobs\\SharedJob' => 'App\\Jobs\\InnerSharedCompensate',
+    ]);
 });
