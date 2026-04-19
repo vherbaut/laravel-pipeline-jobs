@@ -141,7 +141,7 @@ final class SyncParallelGroupRunner
                     $manifest->context,
                 );
 
-                StepInvoker::invokeWithRetry($job, $subConfigs[$subIndex] ?? $defaultConfig);
+                StepInvoker::invokeWithRetry($job, $subConfigs[$subIndex] ?? $defaultConfig, $manifest->context);
 
                 StepInvoker::fireHooks(
                     $manifest->afterEachHooks,

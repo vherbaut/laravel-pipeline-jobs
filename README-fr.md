@@ -53,6 +53,7 @@ Fonctionnalités clés en un coup d'œil :
 - **Hooks de cycle de vie et observabilité.** Six hooks (par étape et au niveau pipeline) pour logs, métriques et alerting.
 - **Pont event listener.** Une ligne pour enregistrer un pipeline comme listener.
 - **Exécution parallèle et branchement.** Groupes fan out / fan in (`JobPipeline::parallel`), sous pipelines imbriqués (`JobPipeline::nest`), branches conditionnelles (`Step::branch`).
+- **Intégration écosystème.** Événements Laravel opt in, `reverse()` pour des rollbacks symétriques, gates de rate limiting et concurrence, trois formes de step acceptées (`handle()`, middleware `handle($passable, Closure $next)`, invokable `__invoke()`).
 - **Boîte à outils de test complète.** `Pipeline::fake()`, mode recording, snapshots de contexte, assertions de compensation.
 
 ## Prérequis
@@ -135,6 +136,105 @@ $result = JobPipeline::make([
 
 Pour le tour complet (conception du contexte, mode queue, compensation, hooks, tests), voir [docs/fr/getting-started.md](docs/fr/getting-started.md).
 
+## Exemple d'intégration écosystème
+
+L'exemple suivant câble quatre fonctionnalités d'intégration dans un seul pipeline. Une chaîne de traitement de commandes scopée par tenant, mixant un step `handle()` classique, un step middleware d'audit et un step invokable Action, gardée par rate limit et concurrence, observable via des événements Laravel.
+
+```php
+use Closure;
+use Illuminate\Support\Facades\Event;
+use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
+use Vherbaut\LaravelPipelineJobs\Concerns\InteractsWithPipeline;
+use Vherbaut\LaravelPipelineJobs\Events\PipelineCompleted;
+use Vherbaut\LaravelPipelineJobs\Events\PipelineStepCompleted;
+use Vherbaut\LaravelPipelineJobs\Events\PipelineStepFailed;
+use Vherbaut\LaravelPipelineJobs\JobPipeline;
+
+// 1. Contexte typé portant l'id du tenant et la commande.
+final class OrderContext extends PipelineContext
+{
+    public ?Invoice $invoice = null;
+
+    public function __construct(
+        public readonly int $tenantId,
+        public readonly Order $order,
+    ) {}
+}
+
+// 2. Step classique handle() avec InteractsWithPipeline pour accéder au contexte.
+final class ValidateOrder
+{
+    use InteractsWithPipeline;
+
+    public function handle(OrderValidator $validator): void
+    {
+        $validator->validate($this->pipelineContext()->order);
+    }
+}
+
+// 3. Step middleware d'audit. Utilise $passable + Closure $next.
+final class AuditStep
+{
+    public function handle(?OrderContext $passable, Closure $next): mixed
+    {
+        logger()->info('pipeline step started', ['tenant' => $passable?->tenantId]);
+        $result = $next($passable);
+        logger()->info('pipeline step finished', ['tenant' => $passable?->tenantId]);
+
+        return $result;
+    }
+}
+
+// 4. Step Action. Invoqué via __invoke(?PipelineContext $context).
+final class NotifyCustomer
+{
+    public function __invoke(?OrderContext $context): void
+    {
+        if ($context?->invoice !== null) {
+            Notification::send($context->order->customer, new OrderConfirmation($context->invoice));
+        }
+    }
+}
+
+// 5. Observer les événements dans un service provider (une fois au boot).
+Event::listen(PipelineStepCompleted::class, fn ($event) => metrics()->increment('pipeline.step.ok', ['class' => $event->stepClass]));
+Event::listen(PipelineStepFailed::class,    fn ($event) => report($event->exception));
+Event::listen(PipelineCompleted::class,     fn ($event) => metrics()->increment('pipeline.run.done'));
+
+// 6. Composer le pipeline. Toutes les fonctionnalités d'intégration en même temps.
+$result = JobPipeline::make([
+    ValidateOrder::class,
+    AuditStep::class,
+    ChargeCustomer::class,
+    NotifyCustomer::class,
+])
+    ->rateLimit(
+        fn (?OrderContext $ctx) => 'orders:tenant:'.$ctx->tenantId,
+        max: 10,
+        perSeconds: 60,
+    )                                                  // Quota par tenant.
+    ->maxConcurrent(
+        fn (?OrderContext $ctx) => 'orders:tenant:'.$ctx->tenantId,
+        limit: 3,
+    )                                                  // Concurrence par tenant.
+    ->dispatchEvents()                                 // Observabilité opt in.
+    ->shouldBeQueued()
+    ->send(new OrderContext(tenantId: $tenant->id, order: $order))
+    ->run();
+
+// Besoin de rejouer les mêmes steps à l'envers pour un unwind tenant wide ?
+// JobPipeline::make([...])->reverse()->send(...)->run();
+```
+
+Le pipeline mixe trois formes de step (classique, middleware, action) de façon transparente. Rate limit et concurrence lèvent `PipelineThrottled` / `PipelineConcurrencyLimitExceeded` avant l'exécution du moindre step quand c'est saturé. Les événements circulent par le dispatcher Laravel et peuvent être observés, queued ou batchés par n'importe quel listener.
+
+Voir les docs dédiées pour chaque fonctionnalité :
+
+- [Événements de pipeline](docs/fr/pipeline-events.md).
+- [Pipelines inversés](docs/fr/reverse-pipelines.md).
+- [Rate limiting et concurrence](docs/fr/rate-limiting-concurrency.md).
+- [Interfaces alternatives de step](docs/fr/alternative-step-interfaces.md).
+
 ## Documentation
 
 La documentation anglaise se trouve sous [`docs/en/`](docs/en/). La documentation française se trouve sous [`docs/fr/`](docs/fr/).
@@ -155,6 +255,10 @@ La documentation anglaise se trouve sous [`docs/en/`](docs/en/). La documentatio
 | Étapes parallèles | Groupes fan out / fan in via `JobPipeline::parallel([...])`, dispatch `Bus::batch()` en queue, fusion de contexte, contraintes d'imbrication. | [docs/fr/parallel-steps.md](docs/fr/parallel-steps.md) |
 | Imbrication de pipelines | Réutiliser des sous pipelines via `JobPipeline::nest(...)`, cursor imbriqué pour la queue, héritage de la FailStrategy extérieure, valeurs par défaut propres aux sous pipelines. | [docs/fr/pipeline-nesting.md](docs/fr/pipeline-nesting.md) |
 | Branchement conditionnel | Sélectionner une branche à l'exécution via `Step::branch($selector, [...])`, valeurs de branches (class string, StepDefinition, sous pipeline), convergence sur l'étape extérieure suivante. | [docs/fr/conditional-branching.md](docs/fr/conditional-branching.md) |
+| Événements de pipeline | Événements Laravel opt in à trois points de cycle (`PipelineStepCompleted`, `PipelineStepFailed`, `PipelineCompleted`), corrélation par `pipelineId`, mise en garde sur les listeners queued. | [docs/fr/pipeline-events.md](docs/fr/pipeline-events.md) |
+| Pipelines inversés | `PipelineBuilder::reverse()` pour inverser les positions extérieures, préservation des structures internes, copie complète de l'état du pipeline, interaction avec la compensation. | [docs/fr/reverse-pipelines.md](docs/fr/reverse-pipelines.md) |
+| Rate limiting et concurrence | Gates d'admission au niveau pipeline via `rateLimit()` et `maxConcurrent()`, clés par closure, prérequis des drivers Cache, composition avec les événements. | [docs/fr/rate-limiting-concurrency.md](docs/fr/rate-limiting-concurrency.md) |
+| Interfaces alternatives de step | Trois formes de step acceptées (`handle()`, middleware `handle($passable, Closure $next)`, invokable `__invoke()`), contrat de nommage des paramètres, compatibilité du trait `InteractsWithPipeline`. | [docs/fr/alternative-step-interfaces.md](docs/fr/alternative-step-interfaces.md) |
 | Tests | `Pipeline::fake()`, mode recording, assertions d'étapes et de contexte, assertions de compensation. | [docs/fr/testing.md](docs/fr/testing.md) |
 | Référence API | Catalogue complet des symboles publics, méthodes, propriétés, exceptions et events. | [docs/fr/api-reference.md](docs/fr/api-reference.md) |
 
@@ -163,8 +267,7 @@ La documentation anglaise se trouve sous [`docs/en/`](docs/en/). La documentatio
 Les fonctionnalités suivantes sont prévues pour les prochaines versions. Les propriétés correspondantes sont déjà réservées dans le code :
 
 - **Pipelines nommés au niveau extérieur.** Un `name('order-fulfillment')` pour tagger le pipeline entier (les groupes parallèles, sous pipelines et branches exposent déjà un `name` facultatif).
-- **Événements de pipeline.** Émettre des événements Laravel aux points clés du cycle de vie.
-- **Limitation de débit et concurrence.** Intégration avec le rate limiter de Laravel pour borner la charge par étape.
+- **Compensation middleware et Action.** Étendre le dispatcher stratégie aux chemins de compensation pour que les classes middleware et Action puissent servir de cibles de compensation (le contrat actuel requiert un `handle()` classique ou `CompensableJob`).
 
 ## Contribuer
 

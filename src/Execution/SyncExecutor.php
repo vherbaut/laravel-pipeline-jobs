@@ -178,6 +178,7 @@ final class SyncExecutor implements PipelineExecutor
                 StepInvoker::invokeWithRetry(
                     $job,
                     $manifest->stepConfigs[$stepIndex] ?? ['queue' => null, 'connection' => null, 'sync' => false, 'retry' => null, 'backoff' => null, 'timeout' => null],
+                    $manifest->context,
                 );
 
                 StepInvoker::fireHooks(

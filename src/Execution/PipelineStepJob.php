@@ -213,7 +213,7 @@ final class PipelineStepJob implements ShouldQueue
                 $this->manifest->context,
             );
 
-            StepInvoker::invokeWithRetry($job, $this->resolveCurrentConfig());
+            StepInvoker::invokeWithRetry($job, $this->resolveCurrentConfig(), $this->manifest->context);
 
             // Story 6.1 Task 6.4: afterEach fires INSIDE the try block so a
             // throwing afterEach is caught by the standard failure path

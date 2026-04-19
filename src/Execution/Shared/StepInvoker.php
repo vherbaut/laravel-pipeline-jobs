@@ -23,12 +23,18 @@ use Vherbaut\LaravelPipelineJobs\StepDefinition;
 final class StepInvoker
 {
     /**
-     * Invoke a step job's handle() with an in-process retry loop.
+     * Invoke a step job through the strategy-aware dispatcher with an in-process retry loop.
      *
      * Fast path when the config declares no retry (null or 0): calls
-     * `app()->call([$job, 'handle'])` once and returns. Retry path runs up
-     * to `retry + 1` attempts with `sleep($backoff)` between non-final
-     * attempts. The final attempt's exception propagates to the caller.
+     * `StepInvocationDispatcher::call($job, $context)` once and returns.
+     * Retry path runs up to `retry + 1` attempts with `sleep($backoff)`
+     * between non-final attempts. The final attempt's exception propagates
+     * to the caller.
+     *
+     * The dispatcher routes the call to one of three contracts based on the
+     * resolved class shape (default `handle()`, middleware `handle($passable,
+     * Closure $next)`, or invokable `__invoke()`); see
+     * `StepInvocationDispatcher::detect()` for selection logic.
      *
      * The `timeout` key of the config is intentionally NOT consulted here;
      * it is applied at dispatch time on the queue wrapper's public
@@ -36,16 +42,17 @@ final class StepInvoker
      *
      * @param object $job The resolved step job instance (already has manifest injected when applicable).
      * @param array{queue?: ?string, connection?: ?string, sync?: bool, retry?: ?int, backoff?: ?int, timeout?: ?int} $config The pre-resolved per-step config; retry/backoff drive the loop.
+     * @param PipelineContext|null $context The live pipeline context routed to middleware-shape and Action-shape steps; null when the pipeline was dispatched without ->send().
      * @return void
      *
      * @throws Throwable The final attempt's exception when the retry loop exhausts.
      */
-    public static function invokeWithRetry(object $job, array $config): void
+    public static function invokeWithRetry(object $job, array $config, ?PipelineContext $context = null): void
     {
         $retry = $config['retry'] ?? null;
 
         if ($retry === null || $retry === 0) {
-            app()->call([$job, 'handle']);
+            StepInvocationDispatcher::call($job, $context);
 
             return;
         }
@@ -58,7 +65,7 @@ final class StepInvoker
             $attempt++;
 
             try {
-                app()->call([$job, 'handle']);
+                StepInvocationDispatcher::call($job, $context);
 
                 return;
             } catch (Throwable $exception) {

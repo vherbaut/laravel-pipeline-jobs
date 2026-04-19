@@ -185,7 +185,7 @@ final class ParallelStepJob implements ShouldQueue
                 $this->manifest->context,
             );
 
-            StepInvoker::invokeWithRetry($job, $this->resolveSubStepConfig());
+            StepInvoker::invokeWithRetry($job, $this->resolveSubStepConfig(), $this->manifest->context);
 
             StepInvoker::fireHooks(
                 $this->manifest->afterEachHooks,

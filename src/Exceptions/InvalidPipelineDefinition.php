@@ -208,4 +208,26 @@ class InvalidPipelineDefinition extends PipelineException
             $context.' key closure must return a non-empty string, got '.get_debug_type($returned).'.',
         );
     }
+
+    /**
+     * Create an exception for a step class that defines neither `handle()` nor `__invoke()`.
+     *
+     * Thrown by StepInvocationDispatcher::detect() at call time (after
+     * `app()->make()` has resolved the step instance) when the resolved
+     * class implements none of the three accepted shapes:
+     * default `handle()`, middleware `handle($passable, Closure $next)`,
+     * or invokable Action `__invoke()`. Validation is deliberately lazy
+     * so the existing `StepDefinition::fromJobClass()` accepts-any-string
+     * contract is preserved.
+     *
+     * @param string $class The fully qualified class name of the offending step.
+     *
+     * @return self
+     */
+    public static function stepClassMissingInvocationMethod(string $class): self
+    {
+        return new self(
+            'Pipeline step class "'.$class.'" must define handle() (single-arg or middleware-shape handle($passable, Closure $next)) or __invoke().',
+        );
+    }
 }

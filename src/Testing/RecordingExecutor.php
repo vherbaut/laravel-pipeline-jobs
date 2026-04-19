@@ -20,6 +20,7 @@ use Vherbaut\LaravelPipelineJobs\Execution\PipelineExecutor;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\CompensationInvoker;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvocationDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -136,7 +137,7 @@ final class RecordingExecutor implements PipelineExecutor
                     $manifest->context,
                 );
 
-                app()->call([$job, 'handle']);
+                StepInvocationDispatcher::call($job, $manifest->context);
 
                 StepInvoker::fireHooks(
                     $manifest->afterEachHooks,
@@ -321,7 +322,7 @@ final class RecordingExecutor implements PipelineExecutor
                     $manifest->context,
                 );
 
-                app()->call([$job, 'handle']);
+                StepInvocationDispatcher::call($job, $manifest->context);
 
                 StepInvoker::fireHooks(
                     $manifest->afterEachHooks,
@@ -537,7 +538,7 @@ final class RecordingExecutor implements PipelineExecutor
                     $manifest->context,
                 );
 
-                app()->call([$job, 'handle']);
+                StepInvocationDispatcher::call($job, $manifest->context);
 
                 StepInvoker::fireHooks(
                     $manifest->afterEachHooks,
@@ -798,7 +799,7 @@ final class RecordingExecutor implements PipelineExecutor
                 $manifest->context,
             );
 
-            app()->call([$job, 'handle']);
+            StepInvocationDispatcher::call($job, $manifest->context);
 
             StepInvoker::fireHooks(
                 $manifest->afterEachHooks,
@@ -986,6 +987,9 @@ final class RecordingExecutor implements PipelineExecutor
                         $property->setValue($job, $manifest);
                     }
 
+                    // AC #11 of Story 9.4: compensation paths remain on the legacy
+                    // app()->call() contract; middleware/Action support for compensation
+                    // is OUT OF SCOPE.
                     app()->call([$job, 'handle']);
                 }
 

@@ -12,6 +12,7 @@ use Vherbaut\LaravelPipelineJobs\Events\PipelineCompleted;
 use Vherbaut\LaravelPipelineJobs\Events\PipelineStepCompleted;
 use Vherbaut\LaravelPipelineJobs\Events\PipelineStepFailed;
 use Vherbaut\LaravelPipelineJobs\Exceptions\PipelineThrottled;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvocationDispatcher;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
@@ -20,6 +21,7 @@ use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Testing\FakePipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderPlacedEvent;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ActionEnrichJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingThenSucceedingJob;
@@ -28,6 +30,7 @@ use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobC;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\HookRecorder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\MiddlewareEnrichJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
@@ -38,6 +41,9 @@ beforeEach(function (): void {
     TrackExecutionJob::$executionOrder = [];
     ReadContextJob::$readName = null;
     HookRecorder::reset();
+    StepInvocationDispatcher::clearCache();
+    MiddlewareEnrichJob::$invocations = 0;
+    ActionEnrichJob::$invocations = 0;
 });
 
 it('fakes a pipeline in a service-like context and asserts dispatch', function (): void {
@@ -882,4 +888,59 @@ it('FakePipelineBuilder rateLimit() and maxConcurrent() return $this for chainab
 
     expect($builder->rateLimit('k', 1, 60))->toBe($builder)
         ->and($builder->maxConcurrent('k', 1))->toBe($builder);
+});
+
+// -----------------------------------------------------------------------------
+// Story 9.4 AC #23 — recording-mode parity for middleware/Action shapes
+// -----------------------------------------------------------------------------
+
+it('records middleware-shape step execution under Pipeline::fake()->recording()', function (): void {
+    Pipeline::fake()->recording();
+
+    Pipeline::make([MiddlewareEnrichJob::class])
+        ->send(new SimpleContext)
+        ->run();
+
+    Pipeline::assertStepExecuted(MiddlewareEnrichJob::class);
+    expect(MiddlewareEnrichJob::$invocations)->toBe(1);
+});
+
+it('records Action-shape step execution under Pipeline::fake()->recording()', function (): void {
+    Pipeline::fake()->recording();
+
+    Pipeline::make([ActionEnrichJob::class])
+        ->send(new SimpleContext)
+        ->run();
+
+    Pipeline::assertStepExecuted(ActionEnrichJob::class);
+    expect(ActionEnrichJob::$invocations)->toBe(1);
+});
+
+it('records mixed step types in declared order under recording mode', function (): void {
+    Pipeline::fake()->recording();
+
+    Pipeline::make([
+        EnrichContextJob::class,
+        MiddlewareEnrichJob::class,
+        ActionEnrichJob::class,
+    ])
+        ->send(new SimpleContext)
+        ->run();
+
+    Pipeline::assertStepsExecutedInOrder([
+        EnrichContextJob::class,
+        MiddlewareEnrichJob::class,
+        ActionEnrichJob::class,
+    ]);
+});
+
+it('default Pipeline::fake() mode does not invoke middleware/action handlers', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([MiddlewareEnrichJob::class, ActionEnrichJob::class])
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(MiddlewareEnrichJob::$invocations)->toBe(0)
+        ->and(ActionEnrichJob::$invocations)->toBe(0);
 });

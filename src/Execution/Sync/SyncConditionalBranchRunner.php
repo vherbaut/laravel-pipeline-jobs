@@ -208,7 +208,7 @@ final class SyncConditionalBranchRunner
                 ? $configEntry
                 : $defaultConfig;
 
-            StepInvoker::invokeWithRetry($job, $flatConfig);
+            StepInvoker::invokeWithRetry($job, $flatConfig, $manifest->context);
 
             StepInvoker::fireHooks(
                 $manifest->afterEachHooks,
