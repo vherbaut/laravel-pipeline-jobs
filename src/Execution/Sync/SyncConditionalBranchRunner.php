@@ -218,8 +218,8 @@ final class SyncConditionalBranchRunner
 
             $manifest->markStepCompleted($selectedClass);
 
-            // Story 9.1 AC #12: only the selected branch path's flat inner step
-            // fires PipelineStepCompleted; non-selected branches never execute
+            // Only the selected branch path's flat inner step fires
+            // PipelineStepCompleted; non-selected branches never execute
             // so they never fire any event. $stepIndex is the branch group's
             // outer index.
             PipelineEventDispatcher::fireStepCompleted($manifest, $groupIndex, $selectedClass);
@@ -240,8 +240,8 @@ final class SyncConditionalBranchRunner
             $manifest->failedStepClass = $selectedClass;
             $manifest->failedStepIndex = $groupIndex;
 
-            // Story 9.1 AC #12: PipelineStepFailed on the selected branch's
-            // inner step; $stepClass is the concrete step class.
+            // PipelineStepFailed on the selected branch's inner step;
+            // $stepClass is the concrete step class.
             PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $selectedClass, $cause);
 
             try {
@@ -323,8 +323,8 @@ final class SyncConditionalBranchRunner
                 );
             }
 
-            // Story 9.1 AC #8: PipelineCompleted fires at the terminal failure
-            // exit of the selected branch's inner step.
+            // PipelineCompleted fires at the terminal failure exit
+            // of the selected branch's inner step.
             PipelineEventDispatcher::fireCompleted($manifest);
 
             throw StepExecutionFailed::forStep(
@@ -362,8 +362,8 @@ final class SyncConditionalBranchRunner
         $manifest->failedStepClass = $branchWrapperLabel;
         $manifest->failedStepIndex = $groupIndex;
 
-        // Story 9.1 AC #12: selector failure (throw, non-string return,
-        // unknown key) fires PipelineStepFailed with the ConditionalBranch<>
+        // Selector failure (throw, non-string return, unknown key)
+        // fires PipelineStepFailed with the ConditionalBranch<>
         // label; no onStepFailed hook runs for selector failures because the
         // selector is infrastructure, not a user step.
         PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $branchWrapperLabel, $cause);
@@ -425,8 +425,8 @@ final class SyncConditionalBranchRunner
             );
         }
 
-        // Story 9.1 AC #8: PipelineCompleted fires at the terminal failure
-        // exit of a selector failure under StopImmediately / StopAndCompensate.
+        // PipelineCompleted fires at the terminal failure exit of
+        // a selector failure under StopImmediately / StopAndCompensate.
         PipelineEventDispatcher::fireCompleted($manifest);
 
         throw StepExecutionFailed::forStep(

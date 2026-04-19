@@ -12,7 +12,7 @@ use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
  * side effects produced by a previously successful pipeline step.
  *
  * Classes implementing this interface declare their rollback logic via the
- * compensate() method. The executor (wired in Story 5.2) calls compensate()
+ * compensate() method. The executor calls compensate()
  * with the PipelineContext present at the failure point, in reverse order of
  * the successfully executed steps, whenever the pipeline's FailStrategy is
  * StopAndCompensate.
@@ -21,7 +21,7 @@ use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
  * trait: both patterns coexist. The interface is the explicit, signature-level
  * contract; the trait is an opt-in helper for context access inside handle().
  *
- * Calling convention since Story 5.3: executors inspect the compensate()
+ * Calling convention: executors inspect the compensate()
  * signature via reflection and pass one or two arguments accordingly.
  * Single-argument implementations keep receiving only the PipelineContext.
  * Two-argument implementations (typed `(PipelineContext $context, ?FailureContext $failure = null)`)

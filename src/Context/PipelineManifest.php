@@ -106,8 +106,8 @@ final class PipelineManifest
      *
      * Serialized in __serialize() / __unserialize() so queued nested
      * execution can resume across worker hops. Legacy payloads (predating
-     * Story 8.2) default the field to `[]` on unserialize, matching the
-     * defensive ?? pattern used for other post-Story-1 fields.
+     * nested-pipeline support) default the field to `[]` on unserialize,
+     * matching the defensive ?? pattern used for other added fields.
      *
      * @var array<int, int>
      */
@@ -143,7 +143,7 @@ final class PipelineManifest
      * failures are converted into continuations, so this callback still
      * fires when the pipeline completes with one or more skip-recovered
      * steps. Users needing per-step failure observability should register
-     * onStepFailed per-step hooks (Story 6.1).
+     * onStepFailed per-step hooks.
      *
      * @var SerializableClosure|null
      */
@@ -157,7 +157,7 @@ final class PipelineManifest
      * created; defaults to null when the pipeline registers no onFailure
      * Closure callback (distinct from the FailStrategy enum carried on
      * $failStrategy). Fires inside the catch block AFTER per-step
-     * onStepFailed hooks (Story 6.1) AND AFTER compensation AND BEFORE
+     * onStepFailed hooks AND AFTER compensation AND BEFORE
      * the terminal rethrow. Does NOT fire under FailStrategy::SkipAndContinue.
      *
      * Per-mode ordering nuance for StopAndCompensate:
@@ -359,8 +359,9 @@ final class PipelineManifest
      *
      * Always restores $failureException as null since the property is never
      * carried across the serialization boundary (see __serialize). Hook
-     * arrays default to empty when the payload predates Story 6.1 (legacy
-     * queue payloads in flight during rolling deployment), matching the
+     * arrays default to empty when the payload predates the lifecycle-hook
+     * fields (legacy queue payloads in flight during rolling deployment),
+     * matching the
      * defensive ?? pattern used for failedStepClass / failedStepIndex.
      *
      * @param array<string, mixed> $data

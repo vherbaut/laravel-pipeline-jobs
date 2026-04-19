@@ -262,12 +262,12 @@ final class QueuedParallelBatchCoordinator
             if (($succeededIndices[$subIndex] ?? false) === true) {
                 $manifest->markStepCompleted($subStepClass);
 
-                // Story 9.1 AC #10: each succeeded parallel sub-step fires
-                // PipelineStepCompleted at fan-in time. ParallelStepJob is a
-                // forbidden file so we cannot dispatch inside the worker that
-                // ran the sub-step; the fan-in batch callback runs in a single
-                // worker and observes the success signal per sub-step, which
-                // is the single authoritative place we can hook the event.
+                // Each succeeded parallel sub-step fires PipelineStepCompleted
+                // at fan-in time. ParallelStepJob cannot dispatch from inside
+                // the worker that ran the sub-step; the fan-in batch callback
+                // runs in a single worker and observes the success signal per
+                // sub-step, which is the single authoritative place we can
+                // hook the event.
                 PipelineEventDispatcher::fireStepCompleted($manifest, $groupIndex, $subStepClass);
             }
         }
@@ -287,9 +287,9 @@ final class QueuedParallelBatchCoordinator
                 "Pipeline [{$pipelineId}] parallel group at position {$groupIndex} failed under {$strategy->name}.",
             );
 
-            // Story 9.1 AC #10: each failed sub-step fires PipelineStepFailed
-            // with the aggregate batch exception. The raw per-sub-step
-            // exception is not exposed by Laravel's Batch API to the finally()
+            // Each failed sub-step fires PipelineStepFailed with the
+            // aggregate batch exception. The raw per-sub-step exception
+            // is not exposed by Laravel's Batch API to the finally()
             // callback, so listeners wanting concrete failure detail should
             // log inside the sub-step or register for onStepFailed hooks.
             foreach ($subStepClasses as $subIndex => $subStepClass) {
@@ -347,8 +347,8 @@ final class QueuedParallelBatchCoordinator
                 }
             }
 
-            // Story 9.1 AC #9: PipelineCompleted fires once at the terminal
-            // failure exit of a parallel batch under StopImmediately /
+            // PipelineCompleted fires once at the terminal failure exit
+            // of a parallel batch under StopImmediately /
             // StopAndCompensate, AFTER onFailure + onComplete callbacks.
             PipelineEventDispatcher::fireCompleted($manifest);
 
@@ -375,9 +375,9 @@ final class QueuedParallelBatchCoordinator
             ($manifest->onCompleteCallback->getClosure())($manifest->context);
         }
 
-        // Story 9.1 AC #9: PipelineCompleted fires once when a parallel group
-        // is the last position in the pipeline and the fan-in reaches the
-        // terminal success tail (no more positions to dispatch after the
+        // PipelineCompleted fires once when a parallel group is the last
+        // position in the pipeline and the fan-in reaches the terminal
+        // success tail (no more positions to dispatch after the
         // group).
         PipelineEventDispatcher::fireCompleted($manifest);
     }

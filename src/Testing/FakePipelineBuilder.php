@@ -573,10 +573,9 @@ final class FakePipelineBuilder
      *
      * Strategy branch (FailStrategy) — last-write-wins saga strategy:
      * - FailStrategy::StopAndCompensate: halts execution and runs compensation
-     *   jobs in reverse order (runtime wired in Story 5.2).
+     *   jobs in reverse order.
      * - FailStrategy::SkipAndContinue: logs the failure, skips the failed step
-     *   and continues with the next step using the last successful context
-     *   (runtime wired in Story 5.3).
+     *   and continues with the next step using the last successful context.
      * - FailStrategy::StopImmediately: halts execution without running any
      *   compensation. This is the default when onFailure() is never called.
      *
@@ -832,13 +831,13 @@ final class FakePipelineBuilder
      */
     private function executeWithRecording(PipelineDefinition $definition, ?PipelineContext $resolvedContext): ?PipelineContext
     {
-        // Story 9.3 — admission-control gates active in recording mode (mirrors
+        // Admission-control gates active in recording mode (mirrors
         // PipelineBuilder::run()). Rate-limit BEFORE concurrency so a quota
         // rejection does not consume a slot.
         PipelineRateLimiter::gate($definition->rateLimitPolicy, $resolvedContext);
         $concurrencyKey = PipelineConcurrencyGate::acquire($definition->concurrencyPolicy, $resolvedContext);
 
-        // Story 9.3 — setup-window guard (mirrors PipelineBuilder::run()):
+        // Setup-window guard (mirrors PipelineBuilder::run()):
         // release the slot if manifest construction or closure wrapping
         // throws between acquire() and the executor try/finally below.
         try {
@@ -1001,7 +1000,7 @@ final class FakePipelineBuilder
 
             throw $e;
         } finally {
-            // Story 9.3 — symmetric concurrency-slot release on success and
+            // Symmetric concurrency-slot release on success and
             // failure tails of recording execution. No-op when the pipeline
             // did not configure maxConcurrent().
             PipelineConcurrencyGate::release($concurrencyKey);

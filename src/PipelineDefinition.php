@@ -153,8 +153,8 @@ final class PipelineDefinition
      * in declaration order, a nested wrapper declared AFTER an outer step
      * with the same class overrides the outer mapping; a nested wrapper
      * declared BEFORE a duplicate outer step is overridden by it. This
-     * mirrors the Story 3-3 "duplicate step class silently loses
-     * compensation mapping" note in deferred-work.md.
+     * mirrors the "duplicate step class silently loses compensation
+     * mapping" note in deferred-work.md.
      * The resulting shape is unchanged from the non-parallel / non-nested
      * case: a class-name-keyed lookup used by the saga compensation chain
      * at reverse-order rollback time.

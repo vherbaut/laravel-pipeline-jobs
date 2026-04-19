@@ -151,7 +151,7 @@ final class SyncParallelGroupRunner
 
                 $manifest->markStepCompleted($subStepClass);
 
-                // Story 9.1 AC #10: each parallel sub-step fires PipelineStepCompleted
+                // Each parallel sub-step fires PipelineStepCompleted
                 // with $stepIndex = the outer group index so listeners
                 // correlate step indices against the user-visible outer
                 // position; $stepClass carries the specific sub-step class.
@@ -167,9 +167,9 @@ final class SyncParallelGroupRunner
                 $manifest->failedStepClass = $subStepClass;
                 $manifest->failedStepIndex = $groupIndex;
 
-                // Story 9.1 AC #10: failing parallel sub-step fires
-                // PipelineStepFailed before hooks fire, matching the top-level
-                // flat-step ordering; $stepIndex is the outer group index.
+                // Failing parallel sub-step fires PipelineStepFailed before
+                // hooks fire, matching the top-level flat-step ordering;
+                // $stepIndex is the outer group index.
                 PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $subStepClass, $subException);
 
                 try {
@@ -249,12 +249,12 @@ final class SyncParallelGroupRunner
                     );
                 }
 
-                // Story 9.1 AC #8: PipelineCompleted fires once at the terminal
-                // failure exit when a parallel sub-step aborts the pipeline
-                // under StopImmediately / StopAndCompensate. Placed AFTER
+                // PipelineCompleted fires once at the terminal failure exit
+                // when a parallel sub-step aborts the pipeline under
+                // StopImmediately / StopAndCompensate. Placed AFTER
                 // onFailure + onComplete callbacks and BEFORE the
                 // StepExecutionFailed rethrow to preserve the "event after
-                // callback" ordering documented in AC #8.
+                // callback" ordering.
                 PipelineEventDispatcher::fireCompleted($manifest);
 
                 throw StepExecutionFailed::forStep(

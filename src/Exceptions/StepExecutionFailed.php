@@ -16,8 +16,8 @@ namespace Vherbaut\LaravelPipelineJobs\Exceptions;
  *   threw. $previous carries the thrown Throwable; $originalStepException is null.
  * - Callback-level failure via forCallbackFailure(): a pipeline-level callback
  *   (onSuccess, onFailure, or onComplete) threw AFTER a step had already failed.
- *   $previous carries the callback exception (which replaces the step exception
- *   per Story 6.2 AC #5 / AC #12), and $originalStepException preserves the
+ *   $previous carries the callback exception (which replaces the step
+ *   exception as the bubbling Throwable), and $originalStepException preserves the
  *   original step Throwable so operators retain full observability.
  */
 class StepExecutionFailed extends PipelineException
@@ -76,7 +76,7 @@ class StepExecutionFailed extends PipelineException
      * that threw after a step had already failed.
      *
      * The callback exception REPLACES the original step exception as the one
-     * that bubbles out of the executor (Story 6.2 AC #5 / AC #12). The
+     * that bubbles out of the executor. The
      * original step exception is preserved on the $originalStepException
      * slot so observability is retained without duplicating the Throwable
      * in the $previous chain.

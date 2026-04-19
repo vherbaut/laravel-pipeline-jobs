@@ -13,14 +13,11 @@ namespace Vherbaut\LaravelPipelineJobs\Enums;
  *
  * Behaviour:
  * - StopAndCompensate: halt pipeline execution and run compensation jobs in
- *   reverse order of the successful steps. Compensation execution is wired
- *   in Story 5.2; in Story 5.1 the strategy is set but not yet consumed.
+ *   reverse order of the successful steps.
  * - SkipAndContinue: log the failure, skip the failed step, and continue with
- *   the next step using the context from the last successful step. SkipAndContinue
- *   semantics are wired in Story 5.3; in Story 5.1 the strategy is set but not
- *   yet consumed.
+ *   the next step using the context from the last successful step.
  * - StopImmediately: halt pipeline execution without running any compensation.
- *   This is the Epic 1 default (FR28) and is applied when onFailure() was never
+ *   This is the default (FR28) and is applied when onFailure() was never
  *   called on the builder.
  */
 enum FailStrategy

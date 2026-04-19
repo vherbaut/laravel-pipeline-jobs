@@ -217,8 +217,8 @@ final class PipelineBuilder
      *
      * Fluent shorthand for addParallelGroup(ParallelStepGroup::fromArray($jobs)).
      *
-     * Conditions on parallel groups are not supported in Epic 8 Story 8.1.
-     * Apply Step::when() / Step::unless() to individual sub-steps before
+     * Conditions on parallel groups are not supported. Apply
+     * Step::when() / Step::unless() to individual sub-steps before
      * wrapping them into the group. Likewise, per-step mutators
      * (compensateWith, onQueue, onConnection, sync, retry, backoff, timeout)
      * chained immediately after parallel() throw InvalidPipelineDefinition;
@@ -262,7 +262,7 @@ final class PipelineBuilder
      * Append a nested sub-pipeline built from a PipelineBuilder or PipelineDefinition.
      *
      * Fluent shorthand for addNestedPipeline(NestedPipeline::from...($pipeline, $name)).
-     * Conditions on nested pipelines are not supported in Story 8.2: apply
+     * Conditions on nested pipelines are not supported: apply
      * Step::when() / Step::unless() to individual inner steps. Per-step
      * mutators (compensateWith, onQueue, onConnection, sync, retry, backoff,
      * timeout) chained immediately after nest() throw InvalidPipelineDefinition
@@ -853,8 +853,8 @@ final class PipelineBuilder
      * is equivalent to first-write-wins for this particular setter.
      *
      * Events dispatch independently of the orthogonal onSuccess / onFailure
-     * / onComplete pipeline-level callbacks (Story 6.2) and the beforeEach
-     * / afterEach / onStepFailed per-step hooks (Story 6.1). A user
+     * / onComplete pipeline-level callbacks and the beforeEach / afterEach /
+     * onStepFailed per-step hooks. A user
      * registering both hooks AND events gets both signals: hooks fire
      * first in-process, events fire through Laravel's event dispatcher.
      *
@@ -900,18 +900,16 @@ final class PipelineBuilder
      *
      * Strategy branch (FailStrategy) — last-write-wins strategy setter:
      * - FailStrategy::StopAndCompensate: halts execution and runs compensation
-     *   jobs in reverse order (runtime wired in Story 5.2).
+     *   jobs in reverse order.
      * - FailStrategy::SkipAndContinue: logs the failure, skips the failed step
-     *   and continues with the next step using the last successful context
-     *   (runtime wired in Story 5.3).
+     *   and continues with the next step using the last successful context.
      * - FailStrategy::StopImmediately: halts execution without running any
-     *   compensation. This is the default when onFailure() is never called
-     *   (preserves Epic 1 FR28 behavior).
+     *   compensation. This is the default when onFailure() is never called.
      *
      * Callback branch (Closure) — last-write-wins pipeline-level callback:
      * - Registers a closure invoked once on terminal pipeline failure under
      *   StopImmediately or StopAndCompensate. The callback fires AFTER per-step
-     *   onStepFailed hooks (Story 6.1), AFTER compensation (sync: chain has
+     *   onStepFailed hooks, AFTER compensation (sync: chain has
      *   fully run; queued: chain has been dispatched — individual jobs execute
      *   on their own workers LATER), and BEFORE the terminal rethrow. Under
      *   FailStrategy::SkipAndContinue the callback does NOT fire because
@@ -956,7 +954,7 @@ final class PipelineBuilder
      * into continuations, so the pipeline reaches the success tail and
      * onSuccess fires even when some (or all) intermediate steps were
      * skip-recovered. Users needing per-step failure observability should
-     * register onStepFailed per-step hooks (Story 6.1).
+     * register onStepFailed per-step hooks.
      *
      * Fires on the success tail of the executor (sync mode: just before the
      * final context is returned; queued mode: on the worker that handles the
@@ -1277,12 +1275,12 @@ final class PipelineBuilder
             ? ($this->context)()
             : $this->context;
 
-        // Story 9.3 — admission-control gates (rate-limit BEFORE concurrency so
+        // Admission-control gates (rate-limit BEFORE concurrency so
         // a quota-exhausted attempt does not consume a concurrency slot).
         PipelineRateLimiter::gate($definition->rateLimitPolicy, $resolvedContext);
         $concurrencyKey = PipelineConcurrencyGate::acquire($definition->concurrencyPolicy, $resolvedContext);
 
-        // Story 9.3 — setup-window guard: release the slot if any of the
+        // Setup-window guard: release the slot if any of the
         // post-acquire wiring throws (SerializableClosure wrapping, manifest
         // construction). The main executor dispatch has its own try/finally
         // below; this guard covers the narrow window between acquire() and
@@ -1325,8 +1323,8 @@ final class PipelineBuilder
             } catch (ContextSerializationFailed $dispatchException) {
                 // Dispatch-time validation failure: no wrapper was enqueued, so
                 // release the slot inline (terminal wrappers never run to release
-                // it). Story 9.3 AC #12 / DD #10. Other throws from execute()
-                // under the sync driver originate from inline-executed wrappers
+                // it). Other throws from execute() under the sync driver
+                // originate from inline-executed wrappers
                 // that already released the slot via PipelineStepJob's terminal
                 // tails; do NOT re-release in those cases.
                 PipelineConcurrencyGate::release($concurrencyKey);
@@ -1393,11 +1391,11 @@ final class PipelineBuilder
                 ? ($contextSource)($event)
                 : $contextSource;
 
-            // Story 9.3 — admission-control gates per listener-event-dispatch.
+            // Admission-control gates per listener-event-dispatch.
             PipelineRateLimiter::gate($definition->rateLimitPolicy, $resolvedContext);
             $concurrencyKey = PipelineConcurrencyGate::acquire($definition->concurrencyPolicy, $resolvedContext);
 
-            // Story 9.3 — setup-window guard (mirrors run()): release the slot
+            // Setup-window guard (mirrors run()): release the slot
             // if manifest construction / callback-wiring throws.
             try {
                 $manifest = PipelineManifest::create(

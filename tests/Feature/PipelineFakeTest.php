@@ -207,7 +207,7 @@ it('skips the return closure in recording mode when a step fails and returns nul
     Pipeline::assertStepNotExecuted(FailingJob::class);
 });
 
-// --- Story 6.1: Per-step lifecycle hooks on PipelineFake / FakePipelineBuilder ---
+// --- Per-step lifecycle hooks on PipelineFake / FakePipelineBuilder ---
 
 it('fires registered hooks in Pipeline::fake()->recording() mode', function (): void {
     Pipeline::fake()->recording();
@@ -261,7 +261,7 @@ it('exposes beforeEach/afterEach/onStepFailed on FakePipelineBuilder delegating 
         ->and($recorded->definition->onStepFailedHooks)->toBe([$failedHook]);
 });
 
-// --- Story 6.2: Pipeline-level callbacks on PipelineFake / FakePipelineBuilder ---
+// --- Pipeline-level callbacks on PipelineFake / FakePipelineBuilder ---
 
 it('pipeline-level: fires onSuccess and onComplete in Pipeline::fake()->recording() mode', function (): void {
     Pipeline::fake()->recording();
@@ -607,7 +607,7 @@ it('Pipeline::fake()->recording() replays a parallel group sequentially through 
     ]);
 });
 
-// --- Story 8.2: NestedPipeline assertions -------------------------------------------------
+// --- NestedPipeline assertions -------------------------------------------------
 
 it('records a nested pipeline in the recorded definition steps array', function (): void {
     Pipeline::fake();
@@ -746,7 +746,7 @@ it('Pipeline::fake()->recording() fires pipeline events when dispatchEvents() is
     Event::assertDispatchedTimes(PipelineCompleted::class, 1);
 });
 
-// Story 9.2 — FakePipelineBuilder::reverse() passthrough (Task 6; AC #14, #15)
+// FakePipelineBuilder::reverse() passthrough
 
 it('Pipeline::fake()->make([A, B, C])->reverse() records the pipeline with reversed step order (AC #14)', function (): void {
     Pipeline::fake();
@@ -836,7 +836,7 @@ it('Pipeline::fake()->recording()->reverse() with dispatchEvents() fires Pipelin
     ]);
 });
 
-// Story 9.3 — FakePipelineBuilder rateLimit() / maxConcurrent() passthroughs
+// FakePipelineBuilder rateLimit() / maxConcurrent() passthroughs
 
 it('Pipeline::fake() rateLimit() is inert in default fake mode (no Cache or RateLimiter calls)', function (): void {
     Cache::spy();
@@ -891,7 +891,7 @@ it('FakePipelineBuilder rateLimit() and maxConcurrent() return $this for chainab
 });
 
 // -----------------------------------------------------------------------------
-// Story 9.4 AC #23 — recording-mode parity for middleware/Action shapes
+// Recording-mode parity for middleware/Action shapes
 // -----------------------------------------------------------------------------
 
 it('records middleware-shape step execution under Pipeline::fake()->recording()', function (): void {

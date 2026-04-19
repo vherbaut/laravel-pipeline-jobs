@@ -14,7 +14,7 @@ use Vherbaut\LaravelPipelineJobs\StepDefinition;
  *
  * Consolidates the retry loop, hook firing, and callback firing that were
  * previously duplicated across SyncExecutor, PipelineStepJob, ParallelStepJob,
- * and RecordingExecutor (Story 5.2 Design Decision #2). Every method is
+ * and RecordingExecutor. Every method is
  * static and stateless so the helper survives queue serialization boundaries
  * by never carrying instance state.
  *

@@ -64,7 +64,7 @@ final class SyncExecutor implements PipelineExecutor
      *   pipeline does not throw. Any subsequent successful step clears the
      *   recorded failure fields; a later failure overwrites them.
      *
-     * Per-step lifecycle hooks (Story 6.1) fire at three points:
+     * Per-step lifecycle hooks fire at three points:
      *
      * - beforeEach: fires after the skip check and manifest injection,
      *   immediately before the step's handle() is called. Skipped steps
@@ -84,7 +84,7 @@ final class SyncExecutor implements PipelineExecutor
      * applies); onStepFailed throws bypass the FailStrategy for the current
      * failure.
      *
-     * Pipeline-level lifecycle callbacks (Story 6.2) fire at two points:
+     * Pipeline-level lifecycle callbacks fire at two points:
      *
      * - On terminal success (all steps ran, pipeline returns): onSuccess
      *   fires first, then onComplete. Under FailStrategy::SkipAndContinue the
@@ -206,13 +206,13 @@ final class SyncExecutor implements PipelineExecutor
                 $manifest->failedStepClass = $stepClass;
                 $manifest->failedStepIndex = $stepIndex;
 
-                // Story 9.1 AC #7: PipelineStepFailed fires BEFORE onStepFailed
-                // per-step hooks. A throwing hook would replace the bubbling
-                // exception, so listeners observe the RAW step failure.
+                // PipelineStepFailed fires BEFORE onStepFailed per-step hooks.
+                // A throwing hook would replace the bubbling exception,
+                // so listeners observe the RAW step failure.
                 PipelineEventDispatcher::fireStepFailed($manifest, $stepIndex, $stepClass, $exception);
 
-                // Story 6.1 AC #3/#7/#8/#9: onStepFailed fires BEFORE FailStrategy
-                // branching. A throwing onStepFailed bypasses the FailStrategy
+                // onStepFailed fires BEFORE FailStrategy branching.
+                // A throwing onStepFailed bypasses the FailStrategy
                 // branching for THIS failure; the hook's exception replaces the
                 // original and is wrapped as StepExecutionFailed in sync mode.
                 try {
@@ -254,10 +254,10 @@ final class SyncExecutor implements PipelineExecutor
                     SyncCompensationRunner::run($manifest);
                 }
 
-                // Story 6.2 AC #2, #11: pipeline-level onFailure fires AFTER
-                // per-step onStepFailed (Story 6.1) AND AFTER compensation
-                // (under StopAndCompensate) AND BEFORE the terminal rethrow.
-                // Under SkipAndContinue this block is unreachable (AC #10).
+                // Pipeline-level onFailure fires AFTER per-step onStepFailed
+                // AND AFTER compensation (under StopAndCompensate) AND
+                // BEFORE the terminal rethrow. Under SkipAndContinue this
+                // block is unreachable.
                 try {
                     StepInvoker::firePipelineCallback(
                         $manifest->onFailureCallback,
@@ -295,8 +295,8 @@ final class SyncExecutor implements PipelineExecutor
                     );
                 }
 
-                // Story 9.1 AC #8: PipelineCompleted fires once at the terminal
-                // failure exit, AFTER onFailure + onComplete callbacks, on both
+                // PipelineCompleted fires once at the terminal failure exit,
+                // AFTER onFailure + onComplete callbacks, on both
                 // StopImmediately and StopAndCompensate branches. A throwing
                 // onComplete/onFailure takes the forCallbackFailure path above,
                 // which skips this dispatch by design (the callback-failure
@@ -313,15 +313,15 @@ final class SyncExecutor implements PipelineExecutor
             }
         }
 
-        // Story 6.2 AC #1, #3, #4: onSuccess fires on terminal success, then
-        // onComplete. A throw from onSuccess short-circuits onComplete
-        // naturally (AC #12); a throw from onComplete bubbles out unwrapped.
+        // onSuccess fires on terminal success, then onComplete.
+        // A throw from onSuccess short-circuits onComplete naturally;
+        // a throw from onComplete bubbles out unwrapped.
         StepInvoker::firePipelineCallback($manifest->onSuccessCallback, $manifest->context);
         StepInvoker::firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
 
-        // Story 9.1 AC #8: PipelineCompleted fires once on the terminal
-        // success exit AFTER onSuccess + onComplete callbacks. Under
-        // SkipAndContinue the pipeline reaches this branch (skipped steps are
+        // PipelineCompleted fires once on the terminal success exit
+        // AFTER onSuccess + onComplete callbacks. Under SkipAndContinue
+        // the pipeline reaches this branch (skipped steps are
         // recovered continuations), so this dispatch also covers the
         // SkipAndContinue success tail.
         PipelineEventDispatcher::fireCompleted($manifest);

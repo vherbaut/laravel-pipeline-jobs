@@ -36,8 +36,8 @@ use Vherbaut\LaravelPipelineJobs\Execution\Shared\CompensationInvoker;
  * CompensationStepJob throws, so remaining compensations in the reversed
  * chain are not executed (each wrapper also has tries = 1). Sync compensation
  * (SyncExecutor::runCompensationChain) swallows per-compensation exceptions
- * and continues. Unification is deferred to Story 5.3 when CompensationFailed
- * events and logging land (NFR6); operators should not rely on best-effort
+ * and continues. Unification with the CompensationFailed events + logging
+ * path (NFR6) is deferred; operators should not rely on best-effort
  * rollback in queued mode today.
  *
  * @internal
@@ -78,11 +78,11 @@ final class CompensationStepJob implements ShouldQueue
      *
      * Resolves the compensation class from the container, then:
      * - if the instance implements CompensableJob, calls compensate($context)
-     *   with the manifest's current PipelineContext (Story 5.1 contract);
+     *   with the manifest's current PipelineContext (CompensableJob contract);
      * - otherwise, injects the manifest via ReflectionProperty into the
      *   instance's pipelineManifest property when present, then invokes
      *   handle() through the container so DI works for trait-based
-     *   compensation jobs (Story 3.3 pattern).
+     *   compensation jobs (legacy pattern).
      *
      * Exceptions propagate to Laravel's native queue failure handling so the
      * job is recorded in failed_jobs. The wrapper caps $tries to 1 (see

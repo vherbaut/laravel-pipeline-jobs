@@ -216,8 +216,8 @@ final class QueuedConditionalBranchHandler
         $manifest->failedStepClass = $branchWrapperLabel;
         $manifest->failedStepIndex = $groupIndex;
 
-        // Story 9.1 AC #12: queued-mode selector failure fires PipelineStepFailed
-        // with the ConditionalBranch<> label under ALL FailStrategy branches.
+        // Queued-mode selector failure fires PipelineStepFailed with the
+        // ConditionalBranch<> label under ALL FailStrategy branches.
         PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $branchWrapperLabel, $cause);
 
         if ($manifest->failStrategy === FailStrategy::SkipAndContinue) {
@@ -240,9 +240,9 @@ final class QueuedConditionalBranchHandler
                     StepInvoker::firePipelineCallback($manifest->onSuccessCallback, $manifest->context);
                     StepInvoker::firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
 
-                    // Story 9.1 AC #8: PipelineCompleted fires at the terminal
-                    // success tail when a SkipAndContinue selector failure
-                    // completes the pipeline with no more positions to dispatch.
+                    // PipelineCompleted fires at the terminal success tail
+                    // when a SkipAndContinue selector failure completes
+                    // the pipeline with no more positions to dispatch.
                     PipelineEventDispatcher::fireCompleted($manifest);
                 }
             } catch (Throwable $dispatchException) {
@@ -295,9 +295,9 @@ final class QueuedConditionalBranchHandler
             );
         }
 
-        // Story 9.1 AC #8: PipelineCompleted fires at the terminal failure
-        // exit of a queued selector failure AFTER onFailure + onComplete
-        // callbacks and BEFORE the StepExecutionFailed rethrow.
+        // PipelineCompleted fires at the terminal failure exit of a
+        // queued selector failure AFTER onFailure + onComplete callbacks
+        // and BEFORE the StepExecutionFailed rethrow.
         PipelineEventDispatcher::fireCompleted($manifest);
 
         throw StepExecutionFailed::forStep(

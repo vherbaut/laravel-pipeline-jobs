@@ -38,17 +38,17 @@ class InvalidPipelineDefinition extends PipelineException
     /**
      * Create an exception for a parallel step group containing a nested parallel group.
      *
-     * Nesting is explicitly out of scope for Epic 8 Story 8.1 (sub-pipeline
-     * nesting lives in Story 8.2). The targeted message names the invariant
-     * and points users at the supported entry types so the build-time error
-     * is actionable.
+     * Nesting of ParallelStepGroup entries is explicitly out of scope.
+     * For sub-pipeline nesting, use JobPipeline::nest(...) instead.
+     * The targeted message names the invariant and points users at the
+     * supported entry types so the build-time error is actionable.
      *
      * @return self
      */
     public static function nestedParallelGroup(): self
     {
         return new self(
-            'Nested parallel step groups are not supported (Epic 8 Story 8.2 covers sub-pipeline nesting). '
+            'Nested parallel step groups are not supported. For sub-pipeline nesting use JobPipeline::nest(...). '
             .'A ParallelStepGroup may only contain class-strings or StepDefinition instances.',
         );
     }
@@ -56,8 +56,8 @@ class InvalidPipelineDefinition extends PipelineException
     /**
      * Create an exception for a parallel step group containing a nested pipeline.
      *
-     * Story 8.2 adds NestedPipeline as a third slot type within a pipeline's
-     * outer $steps array, but embedding a nested pipeline inside a parallel
+     * NestedPipeline is supported as a slot type within a pipeline's outer
+     * $steps array, but embedding a nested pipeline inside a parallel
      * group is explicitly rejected. Rationale: ParallelStepGroup deep-clones
      * the manifest per sub-step so sub-steps can run concurrently, which
      * conflicts with the shared-completedSteps semantic that nested-pipeline

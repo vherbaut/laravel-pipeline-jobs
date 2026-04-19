@@ -20,8 +20,9 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
  * container. Detection is memoized per class to keep the hot path cheap on
  * queue workers that process many steps from the same class.
  *
- * See `StepInvocationStrategy` for the enum cases. See AC #4 of Story 9.4 for
- * the validation contract on classes that implement none of the three shapes.
+ * See `StepInvocationStrategy` for the enum cases. Classes that implement
+ * neither shape throw `InvalidPipelineDefinition` at the first invocation
+ * attempt.
  *
  * @internal
  */
