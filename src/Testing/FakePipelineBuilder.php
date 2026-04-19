@@ -476,6 +476,25 @@ final class FakePipelineBuilder
     }
 
     /**
+     * Opt in to Laravel event dispatch for pipeline lifecycle events.
+     *
+     * Delegates to {@see PipelineBuilder::dispatchEvents()} with identical
+     * semantics: zero-overhead when NOT called, idempotent on repeated calls.
+     * The flag reaches the manifest through executeWithRecording() so
+     * RecordingExecutor honors the opt-in and fires PipelineStepCompleted,
+     * PipelineStepFailed, and PipelineCompleted under
+     * Pipeline::fake()->recording().
+     *
+     * @return static
+     */
+    public function dispatchEvents(): static
+    {
+        $this->builder->dispatchEvents();
+
+        return $this;
+    }
+
+    /**
      * Register a closure that transforms the final PipelineContext into the value returned by run().
      *
      * Mirrors PipelineBuilder::return() with identical semantics (sync-only,
@@ -831,6 +850,7 @@ final class FakePipelineBuilder
             stepConditions: $stepConditions,
             failStrategy: $definition->failStrategy,
             stepConfigs: PipelineBuilder::resolveStepConfigs($definition),
+            dispatchEvents: $definition->dispatchEvents,
         );
 
         // Mirror the PipelineBuilder wiring so RecordingExecutor observes

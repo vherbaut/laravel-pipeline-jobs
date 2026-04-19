@@ -23,6 +23,7 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\Queued\QueuedCompensationDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Queued\QueuedConditionalBranchHandler;
 use Vherbaut\LaravelPipelineJobs\Execution\Queued\QueuedParallelBatchCoordinator;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -238,6 +239,14 @@ final class PipelineStepJob implements ShouldQueue
             $this->manifest->failedStepClass = $stepClass;
             $this->manifest->failedStepIndex = $outerIndex;
 
+            // Story 9.1 AC #9: PipelineStepFailed fires BEFORE onStepFailed
+            // per-step hooks (queued-mode symmetry with SyncExecutor AC #7).
+            // $stepClass is always a flat class-string here: the array-shape
+            // branches return earlier in handle(), so this catch only runs
+            // for a flat step. For nested inner steps the outer index uses
+            // cursor[0] stored in $outerIndex per resolveCurrentStepClass().
+            PipelineEventDispatcher::fireStepFailed($this->manifest, $outerIndex, $stepClass, $cause);
+
             // Story 6.1 AC #3/#7/#8/#9: onStepFailed fires BEFORE FailStrategy
             // branching. A throwing onStepFailed propagates and bypasses the
             // FailStrategy branching for THIS failure (no compensation dispatch,
@@ -331,8 +340,20 @@ final class PipelineStepJob implements ShouldQueue
                 );
             }
 
+            // Story 9.1 AC #9: PipelineCompleted fires at the terminal failure
+            // exit of a queued wrapper under StopImmediately / StopAndCompensate,
+            // AFTER onFailure + onComplete callbacks and BEFORE the rethrow
+            // that marks the wrapper failed in Laravel's queue.
+            PipelineEventDispatcher::fireCompleted($this->manifest);
+
             throw $cause;
         }
+
+        // Story 9.1 AC #9: PipelineStepCompleted fires after afterEach hooks
+        // return and BEFORE advanceAndContinueOrTerminate hops to the next
+        // wrapper. $outerIndex matches the cursor-aware user-visible outer
+        // position for nested/parallel/branch shapes.
+        PipelineEventDispatcher::fireStepCompleted($this->manifest, $outerIndex, $stepClass);
 
         $this->advanceAndContinueOrTerminate($stepClass);
     }
@@ -478,6 +499,12 @@ final class PipelineStepJob implements ShouldQueue
 
         StepInvoker::firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
         StepInvoker::firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+
+        // Story 9.1 AC #9: PipelineCompleted fires once at the terminal
+        // queued exit AFTER onSuccess + onComplete callbacks on the success
+        // tail (and on the SkipAndContinue success tail, which reaches here
+        // through the skip-recovered continuation path).
+        PipelineEventDispatcher::fireCompleted($this->manifest);
     }
 
     /**

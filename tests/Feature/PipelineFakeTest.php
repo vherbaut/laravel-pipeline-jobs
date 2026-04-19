@@ -6,6 +6,9 @@ use Illuminate\Support\Facades\Event;
 use PHPUnit\Framework\AssertionFailedError;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+use Vherbaut\LaravelPipelineJobs\Events\PipelineCompleted;
+use Vherbaut\LaravelPipelineJobs\Events\PipelineStepCompleted;
+use Vherbaut\LaravelPipelineJobs\Events\PipelineStepFailed;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
@@ -696,4 +699,39 @@ it('Pipeline::fake()->recording() replays the selected branch through RecordingE
         TrackExecutionJobA::class,
         TrackExecutionJobB::class,
     ]);
+});
+
+it('Pipeline::fake() without recording does NOT fire pipeline events even with dispatchEvents()', function (): void {
+    Pipeline::fake();
+    Event::fake([
+        PipelineStepCompleted::class,
+        PipelineStepFailed::class,
+        PipelineCompleted::class,
+    ]);
+
+    Pipeline::make([TrackExecutionJobA::class])
+        ->dispatchEvents()
+        ->send(new SimpleContext)
+        ->run();
+
+    Event::assertNotDispatched(PipelineStepCompleted::class);
+    Event::assertNotDispatched(PipelineStepFailed::class);
+    Event::assertNotDispatched(PipelineCompleted::class);
+});
+
+it('Pipeline::fake()->recording() fires pipeline events when dispatchEvents() is enabled', function (): void {
+    Pipeline::fake()->recording();
+    Event::fake([
+        PipelineStepCompleted::class,
+        PipelineCompleted::class,
+    ]);
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::make([TrackExecutionJobA::class, TrackExecutionJobB::class])
+        ->dispatchEvents()
+        ->send(new SimpleContext)
+        ->run();
+
+    Event::assertDispatchedTimes(PipelineStepCompleted::class, 2);
+    Event::assertDispatchedTimes(PipelineCompleted::class, 1);
 });

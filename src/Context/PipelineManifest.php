@@ -183,6 +183,7 @@ final class PipelineManifest
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so queued executors can decide whether to trigger compensation after a step failure.
      * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry count / backoff delay (seconds) / wrapper timeout (seconds) configuration indexed by step position. Group positions carry a discriminator-tagged array whose four shapes mirror $stepClasses: parallel `['type' => 'parallel', 'configs' => [...]]`, nested `['type' => 'nested', 'configs' => [...]]`, branch `['type' => 'branch', 'configs' => array<string, <flat config>|array{type: 'nested', configs: ...}>]` with one config entry per branch key.
+     * @param bool $dispatchEvents Opt-in flag propagated from the PipelineDefinition; when true the executors dispatch PipelineStepCompleted / PipelineStepFailed / PipelineCompleted via PipelineEventDispatcher. When false (the default) no event is ever allocated or dispatched by the pipeline's lifecycle (zero-overhead guarantee). Readonly: set once at manifest creation and preserved across queue serialization hops.
      */
     public function __construct(
         public readonly string $pipelineId,
@@ -200,6 +201,7 @@ final class PipelineManifest
         public FailStrategy $failStrategy = FailStrategy::StopImmediately,
         /** @var array<int, array<string, mixed>> */
         public readonly array $stepConfigs = [],
+        public readonly bool $dispatchEvents = false,
     ) {}
 
     /**
@@ -212,6 +214,7 @@ final class PipelineManifest
      * @param array<int, array<string, mixed>> $stepConditions Per-step condition entries keyed by step index; group positions carry a discriminator-tagged array (parallel / nested / branch).
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so executors can decide whether to trigger compensation after a step failure.
      * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry / backoff / timeout configuration indexed by step position; group positions carry a discriminator-tagged array (parallel / nested / branch).
+     * @param bool $dispatchEvents Opt-in flag driving PipelineStepCompleted / PipelineStepFailed / PipelineCompleted dispatch. Defaults to false so manifests constructed directly (e.g. in tests) stay silent unless the caller explicitly opts in.
      *
      * @return self
      */
@@ -224,6 +227,7 @@ final class PipelineManifest
         array $stepConditions = [],
         FailStrategy $failStrategy = FailStrategy::StopImmediately,
         array $stepConfigs = [],
+        bool $dispatchEvents = false,
     ): self {
         return new self(
             pipelineId: (string) Str::uuid(),
@@ -236,6 +240,7 @@ final class PipelineManifest
             context: $context,
             failStrategy: $failStrategy,
             stepConfigs: $stepConfigs,
+            dispatchEvents: $dispatchEvents,
         );
     }
 
@@ -309,6 +314,7 @@ final class PipelineManifest
             'onFailureCallback' => $this->onFailureCallback,
             'onCompleteCallback' => $this->onCompleteCallback,
             'nestedCursor' => $this->nestedCursor,
+            'dispatchEvents' => $this->dispatchEvents,
         ];
     }
 
@@ -346,6 +352,7 @@ final class PipelineManifest
         $this->onFailureCallback = $data['onFailureCallback'] ?? null;
         $this->onCompleteCallback = $data['onCompleteCallback'] ?? null;
         $this->nestedCursor = $data['nestedCursor'] ?? [];
+        $this->dispatchEvents = $data['dispatchEvents'] ?? false;
     }
 
     /**

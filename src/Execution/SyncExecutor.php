@@ -11,6 +11,7 @@ use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 use Vherbaut\LaravelPipelineJobs\Execution\Sync\SyncCompensationRunner;
@@ -186,6 +187,9 @@ final class SyncExecutor implements PipelineExecutor
                 );
 
                 $manifest->markStepCompleted($stepClass);
+
+                PipelineEventDispatcher::fireStepCompleted($manifest, $stepIndex, $stepClass);
+
                 $manifest->advanceStep();
 
                 // AC #6: a successful step under SkipAndContinue clears any
@@ -200,6 +204,11 @@ final class SyncExecutor implements PipelineExecutor
                 $manifest->failureException = $exception;
                 $manifest->failedStepClass = $stepClass;
                 $manifest->failedStepIndex = $stepIndex;
+
+                // Story 9.1 AC #7: PipelineStepFailed fires BEFORE onStepFailed
+                // per-step hooks. A throwing hook would replace the bubbling
+                // exception, so listeners observe the RAW step failure.
+                PipelineEventDispatcher::fireStepFailed($manifest, $stepIndex, $stepClass, $exception);
 
                 // Story 6.1 AC #3/#7/#8/#9: onStepFailed fires BEFORE FailStrategy
                 // branching. A throwing onStepFailed bypasses the FailStrategy
@@ -285,6 +294,15 @@ final class SyncExecutor implements PipelineExecutor
                     );
                 }
 
+                // Story 9.1 AC #8: PipelineCompleted fires once at the terminal
+                // failure exit, AFTER onFailure + onComplete callbacks, on both
+                // StopImmediately and StopAndCompensate branches. A throwing
+                // onComplete/onFailure takes the forCallbackFailure path above,
+                // which skips this dispatch by design (the callback-failure
+                // chain is already poisoned; firing a terminal event on top
+                // would obscure the original failure chain).
+                PipelineEventDispatcher::fireCompleted($manifest);
+
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,
                     $manifest->currentStepIndex,
@@ -299,6 +317,13 @@ final class SyncExecutor implements PipelineExecutor
         // naturally (AC #12); a throw from onComplete bubbles out unwrapped.
         StepInvoker::firePipelineCallback($manifest->onSuccessCallback, $manifest->context);
         StepInvoker::firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
+
+        // Story 9.1 AC #8: PipelineCompleted fires once on the terminal
+        // success exit AFTER onSuccess + onComplete callbacks. Under
+        // SkipAndContinue the pipeline reaches this branch (skipped steps are
+        // recovered continuations), so this dispatch also covers the
+        // SkipAndContinue success tail.
+        PipelineEventDispatcher::fireCompleted($manifest);
 
         return $manifest->context;
     }

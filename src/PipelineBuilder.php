@@ -28,6 +28,8 @@ final class PipelineBuilder
 
     private bool $shouldBeQueued = false;
 
+    private bool $dispatchEvents = false;
+
     private ?Closure $returnCallback = null;
 
     private FailStrategy $failStrategy = FailStrategy::StopImmediately;
@@ -697,6 +699,46 @@ final class PipelineBuilder
     }
 
     /**
+     * Opt in to Laravel event dispatch for the pipeline's lifecycle events.
+     *
+     * When enabled, the executors dispatch:
+     *
+     * - PipelineStepCompleted after every successful flat step completion
+     *   (including parallel sub-steps, nested inner steps, and the selected
+     *   branch's inner steps).
+     * - PipelineStepFailed when a step throws (fires under ALL FailStrategy
+     *   branches: StopImmediately, StopAndCompensate, SkipAndContinue).
+     * - PipelineCompleted once per pipeline run at terminal exit on either
+     *   success or failure tails (mirrors the onComplete() callback).
+     *
+     * Zero-overhead contract: when dispatchEvents() is NOT called, the
+     * executor never constructs event objects or calls Event::dispatch().
+     * The opt-in flag is the single point of decision, enforced by the
+     * centralized PipelineEventDispatcher helper.
+     *
+     * Idempotent: calling dispatchEvents() twice has no additional effect.
+     * The flag is a simple boolean, not an accumulator, so last-write-wins
+     * is equivalent to first-write-wins for this particular setter.
+     *
+     * Events dispatch independently of the orthogonal onSuccess / onFailure
+     * / onComplete pipeline-level callbacks (Story 6.2) and the beforeEach
+     * / afterEach / onStepFailed per-step hooks (Story 6.1). A user
+     * registering both hooks AND events gets both signals: hooks fire
+     * first in-process, events fire through Laravel's event dispatcher.
+     *
+     * CompensationFailed (operational alerting) is NOT gated by this flag;
+     * it continues to fire unconditionally on compensation failure.
+     *
+     * @return static
+     */
+    public function dispatchEvents(): static
+    {
+        $this->dispatchEvents = true;
+
+        return $this;
+    }
+
+    /**
      * Register a closure that transforms the final PipelineContext into the value returned by run().
      *
      * Behaviour:
@@ -969,6 +1011,7 @@ final class PipelineBuilder
             defaultRetry: $this->defaultRetry,
             defaultBackoff: $this->defaultBackoff,
             defaultTimeout: $this->defaultTimeout,
+            dispatchEvents: $this->dispatchEvents,
         );
     }
 
@@ -1006,6 +1049,7 @@ final class PipelineBuilder
             stepConditions: $this->buildStepConditions($definition),
             failStrategy: $definition->failStrategy,
             stepConfigs: $stepConfigs,
+            dispatchEvents: $definition->dispatchEvents,
         );
 
         $hookClosures = $this->buildHookSerializableClosures($definition);
@@ -1084,6 +1128,7 @@ final class PipelineBuilder
                 stepConditions: $stepConditions,
                 failStrategy: $definition->failStrategy,
                 stepConfigs: $stepConfigs,
+                dispatchEvents: $definition->dispatchEvents,
             );
 
             $manifest->beforeEachHooks = $hookClosures['beforeEach'];

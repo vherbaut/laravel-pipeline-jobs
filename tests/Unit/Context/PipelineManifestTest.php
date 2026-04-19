@@ -311,3 +311,16 @@ it('stepClassAt returns the branch shape verbatim when the cursor path lands on 
 
     expect($manifest->stepClassAt([1]))->toBe($branchShape);
 });
+
+it('preserves dispatchEvents flag through withRekeyedStepConfig deep clone', function (): void {
+    $original = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\A'],
+        stepConfigs: [0 => ['queue' => null]],
+        dispatchEvents: true,
+    );
+
+    $rekeyed = $original->withRekeyedStepConfig(0, ['queue' => 'priority']);
+
+    expect($rekeyed->dispatchEvents)->toBeTrue()
+        ->and($rekeyed->stepConfigs[0])->toBe(['queue' => 'priority']);
+});

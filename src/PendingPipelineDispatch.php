@@ -566,6 +566,23 @@ class PendingPipelineDispatch
     }
 
     /**
+     * Proxies PipelineBuilder::dispatchEvents() and returns the wrapper for chainability.
+     *
+     * Opt in to Laravel event dispatch for PipelineStepCompleted,
+     * PipelineStepFailed, and PipelineCompleted during execution. Zero-overhead
+     * when NOT called; idempotent on repeated calls. See
+     * {@see PipelineBuilder::dispatchEvents()} for full semantics.
+     *
+     * @return static
+     */
+    public function dispatchEvents(): static
+    {
+        $this->builder->dispatchEvents();
+
+        return $this;
+    }
+
+    /**
      * Proxies PipelineBuilder::onFailure() and returns the wrapper for chainability.
      *
      * Configure the pipeline's failure reaction (strategy enum or terminal callback).

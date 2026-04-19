@@ -398,3 +398,20 @@ it('compensationMapping last-wins when two branches declare the same class with 
             FakeJobB::class => CompensateJobC::class,
         ]);
 });
+
+it('defaults dispatchEvents to false when constructor argument is omitted', function (): void {
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass(FakeJobA::class)],
+    );
+
+    expect($definition->dispatchEvents)->toBeFalse();
+});
+
+it('retains the dispatchEvents flag when explicitly enabled via constructor', function (): void {
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass(FakeJobA::class)],
+        dispatchEvents: true,
+    );
+
+    expect($definition->dispatchEvents)->toBeTrue();
+});

@@ -12,6 +12,7 @@ use Throwable;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -185,6 +186,13 @@ final class SyncNestedPipelineRunner
 
                 $manifest->markStepCompleted($entry);
 
+                // Story 9.1 AC #11: nested inner flat steps fire
+                // PipelineStepCompleted with $stepIndex = the TOP outer group
+                // index so listeners correlate against the user-visible outer
+                // position. $groupIndex here is always the top-level index
+                // (the recursive self::run() call preserves it).
+                PipelineEventDispatcher::fireStepCompleted($manifest, $groupIndex, $entry);
+
                 $manifest->failureException = null;
                 $manifest->failedStepClass = null;
                 $manifest->failedStepIndex = null;
@@ -199,6 +207,12 @@ final class SyncNestedPipelineRunner
                 $manifest->failureException = $cause;
                 $manifest->failedStepClass = $entry;
                 $manifest->failedStepIndex = $groupIndex;
+
+                // Story 9.1 AC #11: nested inner flat steps fire
+                // PipelineStepFailed with $stepIndex = the top outer index
+                // BEFORE onStepFailed hooks so listeners observe the RAW
+                // failure even when a throwing hook replaces it.
+                PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $entry, $cause);
 
                 try {
                     StepInvoker::fireHooks(
@@ -273,6 +287,12 @@ final class SyncNestedPipelineRunner
                         $cause,
                     );
                 }
+
+                // Story 9.1 AC #8: PipelineCompleted fires at the terminal
+                // failure exit of a nested inner step, AFTER onFailure +
+                // onComplete callbacks and BEFORE the StepExecutionFailed
+                // rethrow.
+                PipelineEventDispatcher::fireCompleted($manifest);
 
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,

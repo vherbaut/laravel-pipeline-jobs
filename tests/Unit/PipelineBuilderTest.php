@@ -1399,3 +1399,29 @@ it('resolveStepConfigs produces the branch shape delegating nested branch values
         ->and($configs[1]['configs']['nested']['type'])->toBe('nested')
         ->and($configs[1]['configs']['nested']['configs'][0]['retry'])->toBe(9);
 });
+
+it('defaults dispatchEvents flag to false when dispatchEvents() is never called', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->build();
+
+    expect($definition->dispatchEvents)->toBeFalse();
+});
+
+it('flips dispatchEvents flag to true after calling dispatchEvents()', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->dispatchEvents()->build();
+
+    expect($definition->dispatchEvents)->toBeTrue();
+});
+
+it('treats dispatchEvents() as idempotent on repeated calls', function (): void {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $definition = $builder->dispatchEvents()->dispatchEvents()->build();
+
+    expect($definition->dispatchEvents)->toBeTrue();
+});
+
+it('returns the same builder instance from dispatchEvents() for fluent chaining', function (): void {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    expect($builder->dispatchEvents())->toBe($builder);
+});

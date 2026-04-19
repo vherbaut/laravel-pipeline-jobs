@@ -13,6 +13,7 @@ use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -217,6 +218,12 @@ final class SyncConditionalBranchRunner
 
             $manifest->markStepCompleted($selectedClass);
 
+            // Story 9.1 AC #12: only the selected branch path's flat inner step
+            // fires PipelineStepCompleted; non-selected branches never execute
+            // so they never fire any event. $stepIndex is the branch group's
+            // outer index.
+            PipelineEventDispatcher::fireStepCompleted($manifest, $groupIndex, $selectedClass);
+
             $manifest->failureException = null;
             $manifest->failedStepClass = null;
             $manifest->failedStepIndex = null;
@@ -232,6 +239,10 @@ final class SyncConditionalBranchRunner
             $manifest->failureException = $cause;
             $manifest->failedStepClass = $selectedClass;
             $manifest->failedStepIndex = $groupIndex;
+
+            // Story 9.1 AC #12: PipelineStepFailed on the selected branch's
+            // inner step; $stepClass is the concrete step class.
+            PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $selectedClass, $cause);
 
             try {
                 StepInvoker::fireHooks(
@@ -312,6 +323,10 @@ final class SyncConditionalBranchRunner
                 );
             }
 
+            // Story 9.1 AC #8: PipelineCompleted fires at the terminal failure
+            // exit of the selected branch's inner step.
+            PipelineEventDispatcher::fireCompleted($manifest);
+
             throw StepExecutionFailed::forStep(
                 $manifest->pipelineId,
                 $groupIndex,
@@ -346,6 +361,12 @@ final class SyncConditionalBranchRunner
         $manifest->failureException = $cause;
         $manifest->failedStepClass = $branchWrapperLabel;
         $manifest->failedStepIndex = $groupIndex;
+
+        // Story 9.1 AC #12: selector failure (throw, non-string return,
+        // unknown key) fires PipelineStepFailed with the ConditionalBranch<>
+        // label; no onStepFailed hook runs for selector failures because the
+        // selector is infrastructure, not a user step.
+        PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $branchWrapperLabel, $cause);
 
         if ($manifest->failStrategy === FailStrategy::SkipAndContinue) {
             Log::warning('Pipeline conditional-branch selector failed under SkipAndContinue', [
@@ -403,6 +424,10 @@ final class SyncConditionalBranchRunner
                 $cause,
             );
         }
+
+        // Story 9.1 AC #8: PipelineCompleted fires at the terminal failure
+        // exit of a selector failure under StopImmediately / StopAndCompensate.
+        PipelineEventDispatcher::fireCompleted($manifest);
 
         throw StepExecutionFailed::forStep(
             $manifest->pipelineId,

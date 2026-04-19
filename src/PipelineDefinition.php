@@ -35,6 +35,7 @@ final class PipelineDefinition
      * @param int|null $defaultRetry Pipeline-level default retry count inherited by steps without an explicit retry() override.
      * @param int|null $defaultBackoff Pipeline-level default backoff delay (seconds) inherited by steps without an explicit backoff() override.
      * @param int|null $defaultTimeout Pipeline-level default timeout (seconds) inherited by steps without an explicit timeout() override.
+     * @param bool $dispatchEvents Opt-in flag driving PipelineStepCompleted / PipelineStepFailed / PipelineCompleted dispatch during execution. Defaults to false so pipelines pay zero event-dispatch overhead unless the user explicitly calls PipelineBuilder::dispatchEvents().
      *
      * @throws InvalidPipelineDefinition When the steps array is empty.
      */
@@ -55,6 +56,7 @@ final class PipelineDefinition
         public readonly ?int $defaultRetry = null,
         public readonly ?int $defaultBackoff = null,
         public readonly ?int $defaultTimeout = null,
+        public readonly bool $dispatchEvents = false,
     ) {
         if ($this->steps === []) {
             throw InvalidPipelineDefinition::emptySteps();
