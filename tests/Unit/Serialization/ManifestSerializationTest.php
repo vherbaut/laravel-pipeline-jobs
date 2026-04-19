@@ -623,3 +623,43 @@ it('legacy all-string payload default-initializes nestedCursor and survives seri
     expect($restored->stepClasses)->toBe(['App\\Jobs\\A', 'App\\Jobs\\B'])
         ->and($restored->nestedCursor)->toBe([]);
 });
+
+it('round-trips dispatchEvents true through serialization', function () {
+    $manifest = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\Step'],
+        dispatchEvents: true,
+    );
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->dispatchEvents)->toBeTrue();
+});
+
+it('round-trips dispatchEvents false through serialization', function () {
+    $manifest = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\Step'],
+        dispatchEvents: false,
+    );
+
+    /** @var PipelineManifest $restored */
+    $restored = unserialize(serialize($manifest));
+
+    expect($restored->dispatchEvents)->toBeFalse();
+});
+
+it('defaults dispatchEvents to false when deserializing a legacy payload missing the key', function () {
+    $manifest = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\Step'],
+        dispatchEvents: true,
+    );
+
+    $payload = $manifest->__serialize();
+    unset($payload['dispatchEvents']);
+
+    /** @var PipelineManifest $legacy */
+    $legacy = (new ReflectionClass(PipelineManifest::class))->newInstanceWithoutConstructor();
+    $legacy->__unserialize($payload);
+
+    expect($legacy->dispatchEvents)->toBeFalse();
+});

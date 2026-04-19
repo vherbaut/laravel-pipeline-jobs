@@ -311,3 +311,62 @@ it('stepClassAt returns the branch shape verbatim when the cursor path lands on 
 
     expect($manifest->stepClassAt([1]))->toBe($branchShape);
 });
+
+it('preserves dispatchEvents flag through withRekeyedStepConfig deep clone', function (): void {
+    $original = PipelineManifest::create(
+        stepClasses: ['App\\Jobs\\A'],
+        stepConfigs: [0 => ['queue' => null]],
+        dispatchEvents: true,
+    );
+
+    $rekeyed = $original->withRekeyedStepConfig(0, ['queue' => 'priority']);
+
+    expect($rekeyed->dispatchEvents)->toBeTrue()
+        ->and($rekeyed->stepConfigs[0])->toBe(['queue' => 'priority']);
+});
+
+// Story 9.3 — concurrencyKey field + serialization round-trip
+
+it('defaults concurrencyKey to null on a freshly created manifest', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\A']);
+
+    expect($manifest->concurrencyKey)->toBeNull();
+});
+
+it('setConcurrencyKey stashes the resolved cache key value', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\A']);
+
+    $manifest->setConcurrencyKey('pipeline:concurrent:tenant:42');
+
+    expect($manifest->concurrencyKey)->toBe('pipeline:concurrent:tenant:42');
+});
+
+it('setConcurrencyKey(null) clears a previously stashed value', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\A']);
+    $manifest->setConcurrencyKey('pipeline:concurrent:k');
+
+    $manifest->setConcurrencyKey(null);
+
+    expect($manifest->concurrencyKey)->toBeNull();
+});
+
+it('serializes and deserializes concurrencyKey intact', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\A']);
+    $manifest->setConcurrencyKey('pipeline:concurrent:tenant:42');
+
+    /** @var PipelineManifest $rehydrated */
+    $rehydrated = unserialize(serialize($manifest));
+
+    expect($rehydrated->concurrencyKey)->toBe('pipeline:concurrent:tenant:42');
+});
+
+it('legacy payload missing concurrencyKey unserializes to null (defensive ?? fallback)', function (): void {
+    $manifest = PipelineManifest::create(stepClasses: ['App\\Jobs\\A']);
+    $payload = $manifest->__serialize();
+    unset($payload['concurrencyKey']);
+
+    $rehydrated = (new ReflectionClass(PipelineManifest::class))->newInstanceWithoutConstructor();
+    $rehydrated->__unserialize($payload);
+
+    expect($rehydrated->concurrencyKey)->toBeNull();
+});

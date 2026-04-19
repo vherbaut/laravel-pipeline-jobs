@@ -44,7 +44,7 @@ final readonly class FailureContext
      * Returns null when $manifest->failedStepClass is null (the manifest is in a
      * pristine or post-reset state). Otherwise returns a new snapshot with the
      * failure metadata read from the manifest. The failedStepIndex coalesces to
-     * 0 defensively: the Story 5.2 invariant guarantees failedStepClass and
+     * 0 defensively: the compensation-chain invariant guarantees failedStepClass and
      * failedStepIndex are always set together, but PHPStan cannot prove the
      * joint nullability without a conditional type.
      *

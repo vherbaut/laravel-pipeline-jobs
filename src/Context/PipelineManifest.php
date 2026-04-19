@@ -106,12 +106,28 @@ final class PipelineManifest
      *
      * Serialized in __serialize() / __unserialize() so queued nested
      * execution can resume across worker hops. Legacy payloads (predating
-     * Story 8.2) default the field to `[]` on unserialize, matching the
-     * defensive ?? pattern used for other post-Story-1 fields.
+     * nested-pipeline support) default the field to `[]` on unserialize,
+     * matching the defensive ?? pattern used for other added fields.
      *
      * @var array<int, int>
      */
     public array $nestedCursor = [];
+
+    /**
+     * Resolved cache key for the concurrency-gate slot acquired at admission, or null when not configured.
+     *
+     * Carries the resolved concurrency-gate cache key for this run so the
+     * terminal executor (sync success/failure, queued terminal wrapper) can
+     * release the slot via PipelineConcurrencyGate::release(). Null when
+     * maxConcurrent() was not configured on the pipeline. Survives the
+     * serialization boundary so queued wrappers can release the slot at
+     * terminal exit; legacy payloads default to null on unserialize via the
+     * defensive ?? pattern, mirroring the dispatchEvents / nestedCursor
+     * migration.
+     *
+     * @var string|null
+     */
+    public ?string $concurrencyKey = null;
 
     /**
      * Pipeline-level onSuccess callback (wrapped in SerializableClosure for queue transport).
@@ -127,7 +143,7 @@ final class PipelineManifest
      * failures are converted into continuations, so this callback still
      * fires when the pipeline completes with one or more skip-recovered
      * steps. Users needing per-step failure observability should register
-     * onStepFailed per-step hooks (Story 6.1).
+     * onStepFailed per-step hooks.
      *
      * @var SerializableClosure|null
      */
@@ -141,7 +157,7 @@ final class PipelineManifest
      * created; defaults to null when the pipeline registers no onFailure
      * Closure callback (distinct from the FailStrategy enum carried on
      * $failStrategy). Fires inside the catch block AFTER per-step
-     * onStepFailed hooks (Story 6.1) AND AFTER compensation AND BEFORE
+     * onStepFailed hooks AND AFTER compensation AND BEFORE
      * the terminal rethrow. Does NOT fire under FailStrategy::SkipAndContinue.
      *
      * Per-mode ordering nuance for StopAndCompensate:
@@ -183,6 +199,7 @@ final class PipelineManifest
      * @param PipelineContext|null $context The user's pipeline context DTO.
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so queued executors can decide whether to trigger compensation after a step failure.
      * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry count / backoff delay (seconds) / wrapper timeout (seconds) configuration indexed by step position. Group positions carry a discriminator-tagged array whose four shapes mirror $stepClasses: parallel `['type' => 'parallel', 'configs' => [...]]`, nested `['type' => 'nested', 'configs' => [...]]`, branch `['type' => 'branch', 'configs' => array<string, <flat config>|array{type: 'nested', configs: ...}>]` with one config entry per branch key.
+     * @param bool $dispatchEvents Opt-in flag propagated from the PipelineDefinition; when true the executors dispatch PipelineStepCompleted / PipelineStepFailed / PipelineCompleted via PipelineEventDispatcher. When false (the default) no event is ever allocated or dispatched by the pipeline's lifecycle (zero-overhead guarantee). Readonly: set once at manifest creation and preserved across queue serialization hops.
      */
     public function __construct(
         public readonly string $pipelineId,
@@ -200,6 +217,7 @@ final class PipelineManifest
         public FailStrategy $failStrategy = FailStrategy::StopImmediately,
         /** @var array<int, array<string, mixed>> */
         public readonly array $stepConfigs = [],
+        public readonly bool $dispatchEvents = false,
     ) {}
 
     /**
@@ -212,6 +230,7 @@ final class PipelineManifest
      * @param array<int, array<string, mixed>> $stepConditions Per-step condition entries keyed by step index; group positions carry a discriminator-tagged array (parallel / nested / branch).
      * @param FailStrategy $failStrategy Saga failure strategy propagated from the PipelineDefinition so executors can decide whether to trigger compensation after a step failure.
      * @param array<int, array<string, mixed>> $stepConfigs Per-step resolved queue / connection / sync / retry / backoff / timeout configuration indexed by step position; group positions carry a discriminator-tagged array (parallel / nested / branch).
+     * @param bool $dispatchEvents Opt-in flag driving PipelineStepCompleted / PipelineStepFailed / PipelineCompleted dispatch. Defaults to false so manifests constructed directly (e.g. in tests) stay silent unless the caller explicitly opts in.
      *
      * @return self
      */
@@ -224,6 +243,7 @@ final class PipelineManifest
         array $stepConditions = [],
         FailStrategy $failStrategy = FailStrategy::StopImmediately,
         array $stepConfigs = [],
+        bool $dispatchEvents = false,
     ): self {
         return new self(
             pipelineId: (string) Str::uuid(),
@@ -236,6 +256,7 @@ final class PipelineManifest
             context: $context,
             failStrategy: $failStrategy,
             stepConfigs: $stepConfigs,
+            dispatchEvents: $dispatchEvents,
         );
     }
 
@@ -269,6 +290,25 @@ final class PipelineManifest
     public function setContext(PipelineContext $context): void
     {
         $this->context = $context;
+    }
+
+    /**
+     * Stash (or clear) the resolved concurrency-gate cache key for this run.
+     *
+     * Called by PipelineBuilder::run() / PipelineBuilder::toListener() /
+     * FakePipelineBuilder::executeWithRecording() AFTER PipelineManifest::create()
+     * and BEFORE the executor dispatch so the terminal executor (sync: the
+     * builder's finally block; queued: PipelineStepJob's terminal wrappers)
+     * can release the slot via PipelineConcurrencyGate::release(). Accepts
+     * null to clear (used in tests / recording mode).
+     *
+     * @param string|null $key The namespaced cache key returned by PipelineConcurrencyGate::acquire(), or null when no policy is configured.
+     *
+     * @return void
+     */
+    public function setConcurrencyKey(?string $key): void
+    {
+        $this->concurrencyKey = $key;
     }
 
     /**
@@ -309,6 +349,8 @@ final class PipelineManifest
             'onFailureCallback' => $this->onFailureCallback,
             'onCompleteCallback' => $this->onCompleteCallback,
             'nestedCursor' => $this->nestedCursor,
+            'dispatchEvents' => $this->dispatchEvents,
+            'concurrencyKey' => $this->concurrencyKey,
         ];
     }
 
@@ -317,8 +359,9 @@ final class PipelineManifest
      *
      * Always restores $failureException as null since the property is never
      * carried across the serialization boundary (see __serialize). Hook
-     * arrays default to empty when the payload predates Story 6.1 (legacy
-     * queue payloads in flight during rolling deployment), matching the
+     * arrays default to empty when the payload predates the lifecycle-hook
+     * fields (legacy queue payloads in flight during rolling deployment),
+     * matching the
      * defensive ?? pattern used for failedStepClass / failedStepIndex.
      *
      * @param array<string, mixed> $data
@@ -346,6 +389,8 @@ final class PipelineManifest
         $this->onFailureCallback = $data['onFailureCallback'] ?? null;
         $this->onCompleteCallback = $data['onCompleteCallback'] ?? null;
         $this->nestedCursor = $data['nestedCursor'] ?? [];
+        $this->dispatchEvents = $data['dispatchEvents'] ?? false;
+        $this->concurrencyKey = $data['concurrencyKey'] ?? null;
     }
 
     /**

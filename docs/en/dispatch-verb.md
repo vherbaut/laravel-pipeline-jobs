@@ -49,7 +49,7 @@ Every non-terminal fluent method on `PipelineBuilder` is available on the dispat
 - `return()`: dispatch discards the return value by design.
 - `getContext()`: context inspection belongs on a retained builder.
 
-All per-step configuration methods from Epic 7 are available: `onQueue`, `onConnection`, `sync`, `retry`, `backoff`, `timeout`, plus pipeline-level defaults. See [Per-Step Configuration](per-step-configuration.md).
+All per-step configuration methods are available: `onQueue`, `onConnection`, `sync`, `retry`, `backoff`, `timeout`, plus pipeline-level defaults. See [Per-Step Configuration](per-step-configuration.md).
 
 ```php
 Pipeline::dispatch([

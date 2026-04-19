@@ -35,6 +35,9 @@ final class PipelineDefinition
      * @param int|null $defaultRetry Pipeline-level default retry count inherited by steps without an explicit retry() override.
      * @param int|null $defaultBackoff Pipeline-level default backoff delay (seconds) inherited by steps without an explicit backoff() override.
      * @param int|null $defaultTimeout Pipeline-level default timeout (seconds) inherited by steps without an explicit timeout() override.
+     * @param bool $dispatchEvents Opt-in flag driving PipelineStepCompleted / PipelineStepFailed / PipelineCompleted dispatch during execution. Defaults to false so pipelines pay zero event-dispatch overhead unless the user explicitly calls PipelineBuilder::dispatchEvents().
+     * @param RateLimitPolicy|null $rateLimitPolicy Optional pipeline-level rate-limit policy evaluated by PipelineRateLimiter::gate() at admission time. Defaults to null so unconfigured pipelines pay zero overhead.
+     * @param ConcurrencyPolicy|null $concurrencyPolicy Optional pipeline-level concurrency-limit policy evaluated by PipelineConcurrencyGate::acquire() at admission time. Defaults to null so unconfigured pipelines pay zero overhead.
      *
      * @throws InvalidPipelineDefinition When the steps array is empty.
      */
@@ -55,6 +58,9 @@ final class PipelineDefinition
         public readonly ?int $defaultRetry = null,
         public readonly ?int $defaultBackoff = null,
         public readonly ?int $defaultTimeout = null,
+        public readonly bool $dispatchEvents = false,
+        public readonly ?RateLimitPolicy $rateLimitPolicy = null,
+        public readonly ?ConcurrencyPolicy $concurrencyPolicy = null,
     ) {
         if ($this->steps === []) {
             throw InvalidPipelineDefinition::emptySteps();
@@ -147,8 +153,8 @@ final class PipelineDefinition
      * in declaration order, a nested wrapper declared AFTER an outer step
      * with the same class overrides the outer mapping; a nested wrapper
      * declared BEFORE a duplicate outer step is overridden by it. This
-     * mirrors the Story 3-3 "duplicate step class silently loses
-     * compensation mapping" note in deferred-work.md.
+     * mirrors the "duplicate step class silently loses compensation
+     * mapping" note in deferred-work.md.
      * The resulting shape is unchanged from the non-parallel / non-nested
      * case: a class-name-keyed lookup used by the saga compensation chain
      * at reverse-order rollback time.

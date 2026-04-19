@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Laravel\SerializableClosure\SerializableClosure;
+use Vherbaut\LaravelPipelineJobs\ConcurrencyPolicy;
 use Vherbaut\LaravelPipelineJobs\ConditionalBranch;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
@@ -12,6 +13,7 @@ use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\RateLimitPolicy;
 use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
@@ -1398,4 +1400,377 @@ it('resolveStepConfigs produces the branch shape delegating nested branch values
         ->and($configs[1]['configs']['flat']['retry'])->toBe(1)
         ->and($configs[1]['configs']['nested']['type'])->toBe('nested')
         ->and($configs[1]['configs']['nested']['configs'][0]['retry'])->toBe(9);
+});
+
+it('defaults dispatchEvents flag to false when dispatchEvents() is never called', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->build();
+
+    expect($definition->dispatchEvents)->toBeFalse();
+});
+
+it('flips dispatchEvents flag to true after calling dispatchEvents()', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->dispatchEvents()->build();
+
+    expect($definition->dispatchEvents)->toBeTrue();
+});
+
+it('treats dispatchEvents() as idempotent on repeated calls', function (): void {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    $definition = $builder->dispatchEvents()->dispatchEvents()->build();
+
+    expect($definition->dispatchEvents)->toBeTrue();
+});
+
+it('returns the same builder instance from dispatchEvents() for fluent chaining', function (): void {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    expect($builder->dispatchEvents())->toBe($builder);
+});
+
+// Story 9.2 — PipelineBuilder::reverse() (Task 1; AC #1, #2, #4, #5, #6, #7, #12)
+
+it('reverse() returns a distinct PipelineBuilder instance (AC #2)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class]);
+
+    $reversed = $original->reverse();
+
+    expect($reversed)->toBeInstanceOf(PipelineBuilder::class)
+        ->and($reversed)->not->toBe($original);
+});
+
+it('reverse() does not mutate the receiver (AC #1)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class, FakeJobC::class]);
+
+    $original->reverse();
+
+    $definition = $original->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class)
+        ->and($definition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobC::class);
+});
+
+it('reverse() reverses outer-position steps (AC #3, #4 outer positions)', function (): void {
+    $reversed = (new PipelineBuilder([FakeJobA::class, FakeJobB::class, FakeJobC::class]))->reverse();
+
+    $definition = $reversed->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0])->toBeInstanceOf(StepDefinition::class)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobC::class)
+        ->and($definition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('reverse() preserves ParallelStepGroup inner contents (AC #4)', function (): void {
+    $group = ParallelStepGroup::fromArray([FakeJobB::class, TrackExecutionJobA::class]);
+
+    $reversed = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->addParallelGroup($group)
+        ->step(FakeJobC::class)
+        ->reverse();
+
+    $definition = $reversed->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0])->toBeInstanceOf(StepDefinition::class)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobC::class)
+        ->and($definition->steps[1])->toBe($group)
+        ->and($definition->steps[1]->steps[0]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[1]->steps[1]->jobClass)->toBe(TrackExecutionJobA::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('reverse() preserves NestedPipeline inner contents (AC #4)', function (): void {
+    $inner = JobPipeline::make([FakeJobB::class, TrackExecutionJobA::class]);
+    $nested = NestedPipeline::fromBuilder($inner);
+
+    $reversed = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->addNestedPipeline($nested)
+        ->step(FakeJobC::class)
+        ->reverse();
+
+    $definition = $reversed->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobC::class)
+        ->and($definition->steps[1])->toBe($nested)
+        ->and($definition->steps[1]->definition->steps[0]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[1]->definition->steps[1]->jobClass)->toBe(TrackExecutionJobA::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('reverse() preserves ConditionalBranch branches map (AC #4)', function (): void {
+    $selector = fn ($ctx) => 'premium';
+    $branch = ConditionalBranch::fromArray($selector, ['premium' => FakeJobB::class, 'basic' => TrackExecutionJobA::class]);
+
+    $reversed = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->addConditionalBranch($branch)
+        ->step(FakeJobC::class)
+        ->reverse();
+
+    $definition = $reversed->build();
+
+    expect($definition->steps[0]->jobClass)->toBe(FakeJobC::class)
+        ->and($definition->steps[1])->toBe($branch)
+        ->and($definition->steps[1]->selector)->toBe($selector)
+        ->and(array_keys($definition->steps[1]->branches))->toBe(['premium', 'basic'])
+        ->and($definition->steps[1]->branches['premium']->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[1]->branches['basic']->jobClass)->toBe(TrackExecutionJobA::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('reverse() propagates every pipeline-level state field (AC #5)', function (): void {
+    $context = new SimpleContext;
+    $returnClosure = fn ($ctx) => 'returned';
+    $beforeEach = fn () => null;
+    $afterEach = fn () => null;
+    $onFailedHook = fn () => null;
+    $onSuccessCallback = fn () => null;
+    $onFailureCallback = fn () => null;
+    $onCompleteCallback = fn () => null;
+
+    $builder = (new PipelineBuilder([FakeJobA::class, FakeJobB::class]))
+        ->send($context)
+        ->shouldBeQueued()
+        ->dispatchEvents()
+        ->return($returnClosure)
+        ->onFailure(FailStrategy::StopAndCompensate)
+        ->onFailure($onFailureCallback)
+        ->defaultQueue('default-q')
+        ->defaultConnection('default-c')
+        ->defaultRetry(5)
+        ->defaultBackoff(7)
+        ->defaultTimeout(11)
+        ->beforeEach($beforeEach)
+        ->afterEach($afterEach)
+        ->onStepFailed($onFailedHook)
+        ->onSuccess($onSuccessCallback)
+        ->onComplete($onCompleteCallback);
+
+    $reversed = $builder->reverse();
+    $definition = $reversed->build();
+
+    expect($reversed->getContext())->toBe($context)
+        ->and($definition->shouldBeQueued)->toBeTrue()
+        ->and($definition->dispatchEvents)->toBeTrue()
+        ->and($definition->failStrategy)->toBe(FailStrategy::StopAndCompensate)
+        ->and($definition->defaultQueue)->toBe('default-q')
+        ->and($definition->defaultConnection)->toBe('default-c')
+        ->and($definition->defaultRetry)->toBe(5)
+        ->and($definition->defaultBackoff)->toBe(7)
+        ->and($definition->defaultTimeout)->toBe(11)
+        ->and($definition->beforeEachHooks)->toHaveCount(1)
+        ->and($definition->beforeEachHooks[0])->toBe($beforeEach)
+        ->and($definition->afterEachHooks)->toHaveCount(1)
+        ->and($definition->afterEachHooks[0])->toBe($afterEach)
+        ->and($definition->onStepFailedHooks)->toHaveCount(1)
+        ->and($definition->onStepFailedHooks[0])->toBe($onFailedHook)
+        ->and($definition->onSuccess)->toBe($onSuccessCallback)
+        ->and($definition->onFailure)->toBe($onFailureCallback)
+        ->and($definition->onComplete)->toBe($onCompleteCallback);
+});
+
+it('double reverse yields a builder whose steps equal the original by identity (AC #6)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class, FakeJobC::class]);
+    $originalSteps = $original->build()->steps;
+
+    $doubleReversed = $original->reverse()->reverse();
+    $doubleReversedSteps = $doubleReversed->build()->steps;
+
+    expect($doubleReversedSteps)->toHaveCount(3)
+        ->and($doubleReversedSteps[0])->toBe($originalSteps[0])
+        ->and($doubleReversedSteps[1])->toBe($originalSteps[1])
+        ->and($doubleReversedSteps[2])->toBe($originalSteps[2]);
+});
+
+it('mutations on the original builder after reverse() do not leak into the reversed builder (AC #7)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class]);
+    $reversed = $original->reverse();
+
+    $original->step(FakeJobC::class)->beforeEach(fn () => null);
+
+    $reversedDefinition = $reversed->build();
+
+    expect($reversedDefinition->steps)->toHaveCount(2)
+        ->and($reversedDefinition->steps[0]->jobClass)->toBe(FakeJobB::class)
+        ->and($reversedDefinition->steps[1]->jobClass)->toBe(FakeJobA::class)
+        ->and($reversedDefinition->beforeEachHooks)->toHaveCount(0);
+});
+
+it('mutations on the reversed builder after reverse() do not leak back to the original (AC #7)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class]);
+    $reversed = $original->reverse();
+
+    $reversed->step(FakeJobC::class)->afterEach(fn () => null);
+
+    $originalDefinition = $original->build();
+
+    expect($originalDefinition->steps)->toHaveCount(2)
+        ->and($originalDefinition->steps[0]->jobClass)->toBe(FakeJobA::class)
+        ->and($originalDefinition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($originalDefinition->afterEachHooks)->toHaveCount(0);
+});
+
+it('reverse() on a zero-step receiver yields an empty reversed builder that still throws on build() (AC #12)', function (): void {
+    $reversed = (new PipelineBuilder)->reverse();
+
+    expect(fn () => $reversed->build())
+        ->toThrow(InvalidPipelineDefinition::class, 'A pipeline must contain at least one step.');
+});
+
+it('reverse() on a single-step receiver yields a single-step reversed builder with a NEW instance (AC #12)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class]);
+
+    $reversed = $original->reverse();
+
+    expect($reversed)->not->toBe($original)
+        ->and($reversed->build()->steps)->toHaveCount(1)
+        ->and($reversed->build()->steps[0]->jobClass)->toBe(FakeJobA::class);
+});
+
+// Story 9.3 — PipelineBuilder::rateLimit() / maxConcurrent() setters and policy propagation
+
+it('rateLimit() with non-empty string key + valid max + valid perSeconds builds a policy on the definition', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->rateLimit('tenant:42', 100, 60)
+        ->build();
+
+    expect($definition->rateLimitPolicy)->toBeInstanceOf(RateLimitPolicy::class)
+        ->and($definition->rateLimitPolicy->key)->toBe('tenant:42')
+        ->and($definition->rateLimitPolicy->max)->toBe(100)
+        ->and($definition->rateLimitPolicy->perSeconds)->toBe(60);
+});
+
+it('rateLimit() with Closure key stores the closure verbatim on the policy', function (): void {
+    $resolver = static fn (?PipelineContext $ctx): string => 'resolved-key';
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->rateLimit($resolver, 5, 30)
+        ->build();
+
+    expect($definition->rateLimitPolicy)->toBeInstanceOf(RateLimitPolicy::class)
+        ->and($definition->rateLimitPolicy->key)->toBe($resolver);
+});
+
+it('rateLimit() rejects an empty string key', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->rateLimit('', 1, 1))
+        ->toThrow(InvalidPipelineDefinition::class, 'rateLimit key must be a non-empty string or Closure, got empty string.');
+});
+
+it('rateLimit() rejects a whitespace-only key', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->rateLimit("   \t", 1, 1))
+        ->toThrow(InvalidPipelineDefinition::class);
+});
+
+it('rateLimit() rejects max < 1', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->rateLimit('k', 0, 60))
+        ->toThrow(InvalidPipelineDefinition::class, 'rateLimit max must be a positive integer (>= 1), got 0.');
+});
+
+it('rateLimit() rejects perSeconds < 1', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->rateLimit('k', 5, 0))
+        ->toThrow(InvalidPipelineDefinition::class, 'rateLimit perSeconds must be a positive integer (>= 1), got 0.');
+});
+
+it('rateLimit() is last-write-wins when called multiple times', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->rateLimit('a', 1, 1)
+        ->rateLimit('b', 2, 2)
+        ->build();
+
+    expect($definition->rateLimitPolicy?->key)->toBe('b')
+        ->and($definition->rateLimitPolicy?->max)->toBe(2)
+        ->and($definition->rateLimitPolicy?->perSeconds)->toBe(2);
+});
+
+it('rateLimit() returns the same builder instance for fluent chaining', function (): void {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    expect($builder->rateLimit('k', 1, 1))->toBe($builder);
+});
+
+it('maxConcurrent() with non-empty string key + valid limit builds a policy on the definition', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->maxConcurrent('tenant:42', 5)
+        ->build();
+
+    expect($definition->concurrencyPolicy)->toBeInstanceOf(ConcurrencyPolicy::class)
+        ->and($definition->concurrencyPolicy->key)->toBe('tenant:42')
+        ->and($definition->concurrencyPolicy->limit)->toBe(5);
+});
+
+it('maxConcurrent() with Closure key stores the closure verbatim on the policy', function (): void {
+    $resolver = static fn (?PipelineContext $ctx): string => 'resolved-key';
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->maxConcurrent($resolver, 3)
+        ->build();
+
+    expect($definition->concurrencyPolicy)->toBeInstanceOf(ConcurrencyPolicy::class)
+        ->and($definition->concurrencyPolicy->key)->toBe($resolver);
+});
+
+it('maxConcurrent() rejects an empty string key', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->maxConcurrent('', 1))
+        ->toThrow(InvalidPipelineDefinition::class, 'maxConcurrent key must be a non-empty string or Closure, got empty string.');
+});
+
+it('maxConcurrent() rejects limit < 1', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->maxConcurrent('k', 0))
+        ->toThrow(InvalidPipelineDefinition::class, 'maxConcurrent limit must be a positive integer (>= 1), got 0.');
+});
+
+it('maxConcurrent() is last-write-wins when called multiple times', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->maxConcurrent('a', 1)
+        ->maxConcurrent('b', 7)
+        ->build();
+
+    expect($definition->concurrencyPolicy?->key)->toBe('b')
+        ->and($definition->concurrencyPolicy?->limit)->toBe(7);
+});
+
+it('maxConcurrent() returns the same builder instance for fluent chaining', function (): void {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    expect($builder->maxConcurrent('k', 1))->toBe($builder);
+});
+
+it('build() leaves both policies null when neither setter was called (zero-overhead default)', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->build();
+
+    expect($definition->rateLimitPolicy)->toBeNull()
+        ->and($definition->concurrencyPolicy)->toBeNull();
+});
+
+it('reverse() preserves both policies on the cloned builder', function (): void {
+    $original = (new PipelineBuilder([FakeJobA::class, FakeJobB::class]))
+        ->rateLimit('k', 10, 30)
+        ->maxConcurrent('k', 3);
+
+    $reversedDefinition = $original->reverse()->build();
+
+    expect($reversedDefinition->rateLimitPolicy?->key)->toBe('k')
+        ->and($reversedDefinition->rateLimitPolicy?->max)->toBe(10)
+        ->and($reversedDefinition->rateLimitPolicy?->perSeconds)->toBe(30)
+        ->and($reversedDefinition->concurrencyPolicy?->key)->toBe('k')
+        ->and($reversedDefinition->concurrencyPolicy?->limit)->toBe(3);
+});
+
+it('rateLimit() and maxConcurrent() compose on the same builder', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->rateLimit('tenant:42', 100, 60)
+        ->maxConcurrent('tenant:42', 5)
+        ->build();
+
+    expect($definition->rateLimitPolicy)->not->toBeNull()
+        ->and($definition->concurrencyPolicy)->not->toBeNull()
+        ->and($definition->rateLimitPolicy?->key)->toBe('tenant:42')
+        ->and($definition->concurrencyPolicy?->key)->toBe('tenant:42');
 });

@@ -104,3 +104,30 @@ it('idempotent hasRun flag prevents the destructor from re-executing', function 
 
     expect($fake->recordedPipelines())->toHaveCount(0);
 });
+
+it('proxies rateLimit() to the inner builder and returns the wrapper for chainability', function (): void {
+    $builder = new PipelineBuilder([TrackExecutionJobA::class]);
+    $wrapper = new PendingPipelineDispatch($builder);
+
+    $returned = $wrapper->rateLimit('k', 5, 60);
+
+    expect($returned)->toBe($wrapper)
+        ->and($builder->build()->rateLimitPolicy?->key)->toBe('k')
+        ->and($builder->build()->rateLimitPolicy?->max)->toBe(5)
+        ->and($builder->build()->rateLimitPolicy?->perSeconds)->toBe(60);
+
+    $wrapper->cancel();
+});
+
+it('proxies maxConcurrent() to the inner builder and returns the wrapper for chainability', function (): void {
+    $builder = new PipelineBuilder([TrackExecutionJobA::class]);
+    $wrapper = new PendingPipelineDispatch($builder);
+
+    $returned = $wrapper->maxConcurrent('k', 3);
+
+    expect($returned)->toBe($wrapper)
+        ->and($builder->build()->concurrencyPolicy?->key)->toBe('k')
+        ->and($builder->build()->concurrencyPolicy?->limit)->toBe(3);
+
+    $wrapper->cancel();
+});

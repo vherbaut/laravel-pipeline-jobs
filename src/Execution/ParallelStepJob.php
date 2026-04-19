@@ -185,7 +185,7 @@ final class ParallelStepJob implements ShouldQueue
                 $this->manifest->context,
             );
 
-            StepInvoker::invokeWithRetry($job, $this->resolveSubStepConfig());
+            StepInvoker::invokeWithRetry($job, $this->resolveSubStepConfig(), $this->manifest->context);
 
             StepInvoker::fireHooks(
                 $this->manifest->afterEachHooks,
@@ -256,7 +256,7 @@ final class ParallelStepJob implements ShouldQueue
      *
      * Reads the nested entry from
      * $manifest->stepConditions[$groupIndex]['entries'][$subStepIndex] per
-     * the Story 8.1 widened shape. Returns false when no condition is
+     * the widened parallel-group shape. Returns false when no condition is
      * registered (null entry slot) or when the enclosing group entry is
      * missing/non-parallel (defensive: treats malformed shapes as
      * unconditional).

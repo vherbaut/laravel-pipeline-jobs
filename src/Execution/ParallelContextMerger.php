@@ -15,7 +15,7 @@ use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
  * Invoked by the post-batch `then` callback registered on each parallel
  * group's Bus::batch(). Walks the baseline context's public properties once
  * and, for each property, scans the ordered per-sub-step final contexts to
- * pick the winning value. The default Story 8.1 strategy is
+ * pick the winning value. The default strategy is
  * "shallow-overwrite by declaration order":
  *  - A sub-step "owns" a mutation when its final value differs from the
  *    pre-batch baseline AND the final value is non-null.
@@ -25,8 +25,8 @@ use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
  *    with pipelineId, groupIndex, and propertyName for observability (NFR6).
  *  - Null final values never overwrite a non-null baseline value.
  *
- * User-customizable merge strategies are deliberately out of scope for Story
- * 8.1; a follow-up story (Epic 9 or later) will add a user-facing override
+ * User-customizable merge strategies are deliberately out of scope;
+ * a later release will add a user-facing override
  * via `ParallelStepGroup::mergeWith(Closure)`.
  *
  * The merger is pure aside from the conflict-log side effect: it produces a

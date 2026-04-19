@@ -12,6 +12,7 @@ use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\PipelineStepJob;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 
 /**
@@ -215,6 +216,10 @@ final class QueuedConditionalBranchHandler
         $manifest->failedStepClass = $branchWrapperLabel;
         $manifest->failedStepIndex = $groupIndex;
 
+        // Queued-mode selector failure fires PipelineStepFailed with the
+        // ConditionalBranch<> label under ALL FailStrategy branches.
+        PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $branchWrapperLabel, $cause);
+
         if ($manifest->failStrategy === FailStrategy::SkipAndContinue) {
             Log::warning('Pipeline conditional-branch selector failed under SkipAndContinue', [
                 'pipelineId' => $manifest->pipelineId,
@@ -234,6 +239,11 @@ final class QueuedConditionalBranchHandler
                 } else {
                     StepInvoker::firePipelineCallback($manifest->onSuccessCallback, $manifest->context);
                     StepInvoker::firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
+
+                    // PipelineCompleted fires at the terminal success tail
+                    // when a SkipAndContinue selector failure completes
+                    // the pipeline with no more positions to dispatch.
+                    PipelineEventDispatcher::fireCompleted($manifest);
                 }
             } catch (Throwable $dispatchException) {
                 Log::error('Pipeline next-step dispatch failed under SkipAndContinue after selector failure', [
@@ -284,6 +294,11 @@ final class QueuedConditionalBranchHandler
                 $cause,
             );
         }
+
+        // PipelineCompleted fires at the terminal failure exit of a
+        // queued selector failure AFTER onFailure + onComplete callbacks
+        // and BEFORE the StepExecutionFailed rethrow.
+        PipelineEventDispatcher::fireCompleted($manifest);
 
         throw StepExecutionFailed::forStep(
             $manifest->pipelineId,

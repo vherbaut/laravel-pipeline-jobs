@@ -6,12 +6,15 @@ namespace Vherbaut\LaravelPipelineJobs\Testing;
 
 use Closure;
 use Laravel\SerializableClosure\SerializableClosure;
+use Throwable;
 use Vherbaut\LaravelPipelineJobs\ConditionalBranch;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineConcurrencyGate;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineRateLimiter;
 use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
@@ -451,6 +454,55 @@ final class FakePipelineBuilder
     }
 
     /**
+     * Configure a pipeline-level rate-limit policy gated at admission time.
+     *
+     * Delegates to PipelineBuilder::rateLimit(). Inert in Pipeline::fake()
+     * default mode (no underlying pipeline executes — the fake records and
+     * returns). ACTIVE in Pipeline::fake()->recording() mode: the gate runs
+     * via executeWithRecording() using the real RateLimiter facade — tests
+     * should isolate state via RateLimiter::clear() in beforeEach to prevent
+     * cross-test leakage. The validation guards on key / max / perSeconds
+     * remain ACTIVE in both modes.
+     *
+     * @param string|Closure(?PipelineContext): string $keyOrResolver Literal key string OR Closure invoked at admission time with the resolved context returning the key.
+     * @param int $max Maximum admitted run() invocations per window; must be >= 1.
+     * @param int $perSeconds Window length in seconds; must be >= 1.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $keyOrResolver is empty, $max < 1, or $perSeconds < 1.
+     */
+    public function rateLimit(string|Closure $keyOrResolver, int $max, int $perSeconds): static
+    {
+        $this->builder->rateLimit($keyOrResolver, $max, $perSeconds);
+
+        return $this;
+    }
+
+    /**
+     * Configure a pipeline-level concurrency-limit policy gated at admission time.
+     *
+     * Delegates to PipelineBuilder::maxConcurrent(). Inert in Pipeline::fake()
+     * default mode (no underlying pipeline executes — the fake records and
+     * returns). ACTIVE in Pipeline::fake()->recording() mode: the gate runs
+     * via executeWithRecording() using the real Cache facade — tests should
+     * isolate state via Cache::flush() in beforeEach to prevent cross-test
+     * leakage. The validation guards on key / limit remain ACTIVE in both
+     * modes.
+     *
+     * @param string|Closure(?PipelineContext): string $keyOrResolver Literal key string OR Closure invoked at admission time with the resolved context returning the key.
+     * @param int $limit Maximum number of pipelines admitted simultaneously on the same resolved key; must be >= 1.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $keyOrResolver is empty or $limit < 1.
+     */
+    public function maxConcurrent(string|Closure $keyOrResolver, int $limit): static
+    {
+        $this->builder->maxConcurrent($keyOrResolver, $limit);
+
+        return $this;
+    }
+
+    /**
      * Set the context to inject into the pipeline at execution time.
      *
      * @param PipelineContext|Closure $context The context instance or a closure that produces one.
@@ -471,6 +523,25 @@ final class FakePipelineBuilder
     public function shouldBeQueued(): static
     {
         $this->builder->shouldBeQueued();
+
+        return $this;
+    }
+
+    /**
+     * Opt in to Laravel event dispatch for pipeline lifecycle events.
+     *
+     * Delegates to {@see PipelineBuilder::dispatchEvents()} with identical
+     * semantics: zero-overhead when NOT called, idempotent on repeated calls.
+     * The flag reaches the manifest through executeWithRecording() so
+     * RecordingExecutor honors the opt-in and fires PipelineStepCompleted,
+     * PipelineStepFailed, and PipelineCompleted under
+     * Pipeline::fake()->recording().
+     *
+     * @return static
+     */
+    public function dispatchEvents(): static
+    {
+        $this->builder->dispatchEvents();
 
         return $this;
     }
@@ -502,10 +573,9 @@ final class FakePipelineBuilder
      *
      * Strategy branch (FailStrategy) — last-write-wins saga strategy:
      * - FailStrategy::StopAndCompensate: halts execution and runs compensation
-     *   jobs in reverse order (runtime wired in Story 5.2).
+     *   jobs in reverse order.
      * - FailStrategy::SkipAndContinue: logs the failure, skips the failed step
-     *   and continues with the next step using the last successful context
-     *   (runtime wired in Story 5.3).
+     *   and continues with the next step using the last successful context.
      * - FailStrategy::StopImmediately: halts execution without running any
      *   compensation. This is the default when onFailure() is never called.
      *
@@ -518,7 +588,7 @@ final class FakePipelineBuilder
      * The two branches are orthogonal storage slots: calling once with a
      * FailStrategy and once with a Closure registers BOTH independently.
      *
-     * @param FailStrategy|Closure(?PipelineContext, \Throwable): void $strategyOrCallback Either the saga strategy or a callback invoked once on terminal pipeline failure.
+     * @param FailStrategy|Closure(?PipelineContext, Throwable): void $strategyOrCallback Either the saga strategy or a callback invoked once on terminal pipeline failure.
      * @return static
      */
     public function onFailure(FailStrategy|Closure $strategyOrCallback): static
@@ -619,7 +689,7 @@ final class FakePipelineBuilder
      * onStepFailed() is an append-semantic observability hook,
      * onFailure(FailStrategy) is a last-write-wins strategy setter.
      *
-     * @param Closure(StepDefinition, ?PipelineContext, \Throwable): void $hook Closure invoked on step failure.
+     * @param Closure(StepDefinition, ?PipelineContext, Throwable): void $hook Closure invoked on step failure.
      * @return static
      */
     public function onStepFailed(Closure $hook): static
@@ -627,6 +697,34 @@ final class FakePipelineBuilder
         $this->builder->onStepFailed($hook);
 
         return $this;
+    }
+
+    /**
+     * Return a new FakePipelineBuilder wrapping a reversed inner PipelineBuilder.
+     *
+     * Delegates to {@see PipelineBuilder::reverse()} with identical semantics:
+     * the returned fake builder wraps a NEW underlying PipelineBuilder whose
+     * outer-position steps are reversed, and carries the same PipelineFake
+     * reference plus the currently registered return callback slot. The
+     * original fake remains untouched and available for further configuration
+     * and assertion against subsequent runs.
+     *
+     * Recording-mode parity: when the enclosing fake was switched into
+     * recording mode via {@see PipelineFake::recording()},
+     * {@see self::executeWithRecording()} consumes the reversed definition
+     * exactly as any non-reversed definition, so recorded step order and any
+     * opt-in PipelineStepCompleted / PipelineCompleted events fire in the
+     * reversed order.
+     *
+     * @return static A NEW FakePipelineBuilder wrapping a reversed inner builder.
+     */
+    public function reverse(): static
+    {
+        $clone = new self($this->fake);
+        $clone->builder = $this->builder->reverse();
+        $clone->returnCallback = $this->returnCallback;
+
+        return $clone;
     }
 
     /**
@@ -733,130 +831,147 @@ final class FakePipelineBuilder
      */
     private function executeWithRecording(PipelineDefinition $definition, ?PipelineContext $resolvedContext): ?PipelineContext
     {
-        $stepClasses = [];
+        // Admission-control gates active in recording mode (mirrors
+        // PipelineBuilder::run()). Rate-limit BEFORE concurrency so a quota
+        // rejection does not consume a slot.
+        PipelineRateLimiter::gate($definition->rateLimitPolicy, $resolvedContext);
+        $concurrencyKey = PipelineConcurrencyGate::acquire($definition->concurrencyPolicy, $resolvedContext);
 
-        foreach ($definition->steps as $index => $step) {
-            if ($step instanceof ParallelStepGroup) {
-                $stepClasses[$index] = [
-                    'type' => 'parallel',
-                    'classes' => array_map(
-                        static fn (StepDefinition $subStep): string => $subStep->jobClass,
-                        $step->steps,
-                    ),
-                ];
+        // Setup-window guard (mirrors PipelineBuilder::run()):
+        // release the slot if manifest construction or closure wrapping
+        // throws between acquire() and the executor try/finally below.
+        try {
+            $stepClasses = [];
 
-                continue;
+            foreach ($definition->steps as $index => $step) {
+                if ($step instanceof ParallelStepGroup) {
+                    $stepClasses[$index] = [
+                        'type' => 'parallel',
+                        'classes' => array_map(
+                            static fn (StepDefinition $subStep): string => $subStep->jobClass,
+                            $step->steps,
+                        ),
+                    ];
+
+                    continue;
+                }
+
+                if ($step instanceof NestedPipeline) {
+                    $stepClasses[$index] = self::buildNestedStepClassesPayload($step);
+
+                    continue;
+                }
+
+                if ($step instanceof ConditionalBranch) {
+                    $stepClasses[$index] = self::buildConditionalBranchStepClassesPayload($step);
+
+                    continue;
+                }
+
+                $stepClasses[$index] = $step->jobClass;
             }
 
-            if ($step instanceof NestedPipeline) {
-                $stepClasses[$index] = self::buildNestedStepClassesPayload($step);
+            $stepConditions = [];
 
-                continue;
-            }
+            foreach ($definition->steps as $index => $step) {
+                if ($step instanceof ParallelStepGroup) {
+                    $entries = [];
+                    $hasAny = false;
 
-            if ($step instanceof ConditionalBranch) {
-                $stepClasses[$index] = self::buildConditionalBranchStepClassesPayload($step);
+                    foreach ($step->steps as $subIndex => $subStep) {
+                        if ($subStep->condition === null) {
+                            $entries[$subIndex] = null;
 
-                continue;
-            }
+                            continue;
+                        }
 
-            $stepClasses[$index] = $step->jobClass;
-        }
-
-        $stepConditions = [];
-
-        foreach ($definition->steps as $index => $step) {
-            if ($step instanceof ParallelStepGroup) {
-                $entries = [];
-                $hasAny = false;
-
-                foreach ($step->steps as $subIndex => $subStep) {
-                    if ($subStep->condition === null) {
-                        $entries[$subIndex] = null;
-
-                        continue;
+                        $entries[$subIndex] = [
+                            'closure' => new SerializableClosure($subStep->condition),
+                            'negated' => $subStep->conditionNegated,
+                        ];
+                        $hasAny = true;
                     }
 
-                    $entries[$subIndex] = [
-                        'closure' => new SerializableClosure($subStep->condition),
-                        'negated' => $subStep->conditionNegated,
-                    ];
-                    $hasAny = true;
+                    if ($hasAny) {
+                        $stepConditions[$index] = [
+                            'type' => 'parallel',
+                            'entries' => $entries,
+                        ];
+                    }
+
+                    continue;
                 }
 
-                if ($hasAny) {
-                    $stepConditions[$index] = [
-                        'type' => 'parallel',
-                        'entries' => $entries,
-                    ];
+                if ($step instanceof NestedPipeline) {
+                    $nestedConditions = self::buildNestedStepConditionsPayload($step);
+
+                    if ($nestedConditions !== null) {
+                        $stepConditions[$index] = $nestedConditions;
+                    }
+
+                    continue;
                 }
 
-                continue;
-            }
+                if ($step instanceof ConditionalBranch) {
+                    $branchConditions = self::buildConditionalBranchStepConditionsPayload($step);
 
-            if ($step instanceof NestedPipeline) {
-                $nestedConditions = self::buildNestedStepConditionsPayload($step);
+                    if ($branchConditions !== null) {
+                        $stepConditions[$index] = $branchConditions;
+                    }
 
-                if ($nestedConditions !== null) {
-                    $stepConditions[$index] = $nestedConditions;
+                    continue;
                 }
 
-                continue;
-            }
-
-            if ($step instanceof ConditionalBranch) {
-                $branchConditions = self::buildConditionalBranchStepConditionsPayload($step);
-
-                if ($branchConditions !== null) {
-                    $stepConditions[$index] = $branchConditions;
+                if ($step->condition === null) {
+                    continue;
                 }
 
-                continue;
+                $stepConditions[$index] = [
+                    'closure' => new SerializableClosure($step->condition),
+                    'negated' => $step->conditionNegated,
+                ];
             }
 
-            if ($step->condition === null) {
-                continue;
-            }
+            $manifest = PipelineManifest::create(
+                stepClasses: $stepClasses,
+                context: $resolvedContext,
+                compensationMapping: $definition->compensationMapping(),
+                stepConditions: $stepConditions,
+                failStrategy: $definition->failStrategy,
+                stepConfigs: PipelineBuilder::resolveStepConfigs($definition),
+                dispatchEvents: $definition->dispatchEvents,
+            );
+            $manifest->setConcurrencyKey($concurrencyKey);
 
-            $stepConditions[$index] = [
-                'closure' => new SerializableClosure($step->condition),
-                'negated' => $step->conditionNegated,
-            ];
+            // Mirror the PipelineBuilder wiring so RecordingExecutor observes
+            // the same hook and callback contract as SyncExecutor.
+            $manifest->beforeEachHooks = array_map(
+                static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
+                $definition->beforeEachHooks,
+            );
+            $manifest->afterEachHooks = array_map(
+                static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
+                $definition->afterEachHooks,
+            );
+            $manifest->onStepFailedHooks = array_map(
+                static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
+                $definition->onStepFailedHooks,
+            );
+
+            $manifest->onSuccessCallback = $definition->onSuccess === null
+                ? null
+                : new SerializableClosure($definition->onSuccess);
+            $manifest->onFailureCallback = $definition->onFailure === null
+                ? null
+                : new SerializableClosure($definition->onFailure);
+            $manifest->onCompleteCallback = $definition->onComplete === null
+                ? null
+                : new SerializableClosure($definition->onComplete);
+        } catch (Throwable $setupException) {
+            PipelineConcurrencyGate::release($concurrencyKey);
+
+            throw $setupException;
         }
-
-        $manifest = PipelineManifest::create(
-            stepClasses: $stepClasses,
-            context: $resolvedContext,
-            compensationMapping: $definition->compensationMapping(),
-            stepConditions: $stepConditions,
-            failStrategy: $definition->failStrategy,
-            stepConfigs: PipelineBuilder::resolveStepConfigs($definition),
-        );
-
-        // Mirror the PipelineBuilder wiring so RecordingExecutor observes
-        // the same hook and callback contract as SyncExecutor.
-        $manifest->beforeEachHooks = array_map(
-            static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
-            $definition->beforeEachHooks,
-        );
-        $manifest->afterEachHooks = array_map(
-            static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
-            $definition->afterEachHooks,
-        );
-        $manifest->onStepFailedHooks = array_map(
-            static fn (Closure $hook): SerializableClosure => new SerializableClosure($hook),
-            $definition->onStepFailedHooks,
-        );
-
-        $manifest->onSuccessCallback = $definition->onSuccess === null
-            ? null
-            : new SerializableClosure($definition->onSuccess);
-        $manifest->onFailureCallback = $definition->onFailure === null
-            ? null
-            : new SerializableClosure($definition->onFailure);
-        $manifest->onCompleteCallback = $definition->onComplete === null
-            ? null
-            : new SerializableClosure($definition->onComplete);
 
         $executor = new RecordingExecutor;
 
@@ -884,6 +999,11 @@ final class FakePipelineBuilder
             );
 
             throw $e;
+        } finally {
+            // Symmetric concurrency-slot release on success and
+            // failure tails of recording execution. No-op when the pipeline
+            // did not configure maxConcurrent().
+            PipelineConcurrencyGate::release($concurrencyKey);
         }
     }
 

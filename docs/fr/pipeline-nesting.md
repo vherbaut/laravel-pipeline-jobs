@@ -111,7 +111,7 @@ Le cursor est automatiquement avancé par `advanceCursorOrOuter()` après chaque
 
 ## Configuration et valeurs par défaut
 
-Les valeurs par défaut du pipeline extérieur (`defaultQueue()`, `defaultConnection()`, `defaultRetry()`, `defaultBackoff()`, `defaultTimeout()`) s'appliquent à chaque étape extérieure **sauf** lorsqu'elles sont remplacées par un `Step::make(...)->onQueue(...)`. Les sous étapes d'un `NestedPipeline` utilisent les valeurs par défaut de leur **propre** `PipelineDefinition` intérieure, **pas** celles du pipeline extérieur (règle documentée dans la Story 8.2).
+Les valeurs par défaut du pipeline extérieur (`defaultQueue()`, `defaultConnection()`, `defaultRetry()`, `defaultBackoff()`, `defaultTimeout()`) s'appliquent à chaque étape extérieure **sauf** lorsqu'elles sont remplacées par un `Step::make(...)->onQueue(...)`. Les sous étapes d'un `NestedPipeline` utilisent les valeurs par défaut de leur **propre** `PipelineDefinition` intérieure, **pas** celles du pipeline extérieur.
 
 Ceci permet de composer un pipeline réutilisable avec sa propre politique de queue / retry sans que le pipeline extérieur la contamine :
 

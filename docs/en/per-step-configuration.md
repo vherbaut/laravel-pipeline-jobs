@@ -1,6 +1,6 @@
 # Per-Step Configuration
 
-Epic 7 introduces per-step configuration for queue targeting, sync execution, retry, backoff, and timeout, plus pipeline-level defaults that apply to every step unless explicitly overridden.
+The per-step configuration API covers queue targeting, sync execution, retry, backoff, and timeout, plus pipeline-level defaults that apply to every step unless explicitly overridden.
 
 All per-step configuration methods chain directly after `step()` (or `addStep()`) and apply to the last added step. Pipeline-level defaults can be declared anywhere on the builder (before or after steps). Per-step values always win over defaults.
 
@@ -140,7 +140,7 @@ The "must be called after at least one step" constraint exists because per-step 
 
 ## Complete Example
 
-A realistic order-fulfillment pipeline mixing all Epic 7 features:
+A realistic order-fulfillment pipeline mixing every per-step configuration knob:
 
 ```php
 use Vherbaut\LaravelPipelineJobs\JobPipeline;

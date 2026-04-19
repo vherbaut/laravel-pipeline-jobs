@@ -22,6 +22,7 @@ const DISPATCH_PROXY_EXCLUDED_BUILDER_METHODS = [
     'toListener',   // listen() is the registration verb (AC #7)
     'return',       // dispatch() discards the return value (AC #6)
     'getContext',   // context inspection belongs on a retained builder (AC #7)
+    'reverse',      // reverse() returns a NEW PipelineBuilder, incompatible with PendingPipelineDispatch's private readonly builder reference (Story 9.2 AC #13)
 ];
 
 /** Non-proxy methods on PendingPipelineDispatch (lifecycle + control, not mirrored from the builder). */
@@ -65,6 +66,10 @@ it('PendingPipelineDispatch does NOT expose any of the excluded terminal builder
             $excluded,
         ));
     }
+});
+
+it('PendingPipelineDispatch does NOT expose reverse() because reverse returns a NEW PipelineBuilder (Story 9.2 AC #13)', function (): void {
+    expect(method_exists(PendingPipelineDispatch::class, 'reverse'))->toBeFalse();
 });
 
 it('every PendingPipelineDispatch public method is either a proxy or a declared non-proxy', function (): void {

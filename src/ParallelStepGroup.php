@@ -16,10 +16,10 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
  * mutations are observable after the group completes, and the group advances
  * the pipeline's outer position as a single logical step).
  *
- * Nesting is explicitly out of scope for Epic 8 Story 8.1: a ParallelStepGroup
+ * Nesting is explicitly out of scope: a ParallelStepGroup
  * may only contain StepDefinition instances, not other ParallelStepGroup
- * instances. Story 8.2 landed NestedPipeline support but parallel groups
- * EXPLICITLY reject NestedPipeline entries: nesting across parallel
+ * instances. Parallel groups also EXPLICITLY reject NestedPipeline
+ * entries: nesting across parallel
  * boundaries breaks the shared-completedSteps compensation semantic because
  * ParallelStepGroup deep-clones the manifest per sub-step while nested-
  * pipeline compensation requires one merged flat list. Wrap the nested
@@ -27,8 +27,8 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
  *
  * Conditions on parallel groups are also rejected at build time: individual
  * sub-steps may carry their own Step::when() / Step::unless() closures, but
- * no aggregate when()/unless() is available on the group itself. Story 8.3
- * landed ConditionalBranch as the fourth slot type, but branches inside a
+ * no aggregate when()/unless() is available on the group itself.
+ * ConditionalBranch is accepted as a fourth slot type, but branches inside a
  * parallel group are EXPLICITLY REJECTED via
  * InvalidPipelineDefinition::conditionalBranchInsideParallelGroup(): parallel
  * deep-clones the manifest per sub-step, multiplying the selector evaluation
@@ -65,12 +65,12 @@ final class ParallelStepGroup
      * caller attached upstream).
      *
      * The factory enforces two invariants:
-     *  - the input array is non-empty (Story 8.1 AC #1 — empty arrays throw
+     *  - the input array is non-empty (empty arrays throw
      *    InvalidPipelineDefinition::emptyParallelGroup()),
      *  - every entry is a string or a StepDefinition (any other type throws
      *    InvalidPipelineDefinition with the offending type named).
      *
-     * Nested ParallelStepGroup entries are NOT allowed in Story 8.1 (see
+     * Nested ParallelStepGroup entries are NOT allowed (see
      * class-level PHPDoc). Such entries fall through to the generic
      * "unsupported type" branch and throw InvalidPipelineDefinition.
      *

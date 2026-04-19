@@ -537,6 +537,49 @@ class PendingPipelineDispatch
     }
 
     /**
+     * Proxies PipelineBuilder::rateLimit() and returns the wrapper for chainability.
+     *
+     * Configure a pipeline-level rate-limit policy gated at admission time.
+     * Last-write-wins. Zero-overhead when NOT called.
+     *
+     * @param string|Closure(?PipelineContext): string $keyOrResolver Literal key string OR Closure invoked at admission time with the resolved context returning the key.
+     * @param int $max Maximum admitted run() invocations per window; must be >= 1.
+     * @param int $perSeconds Window length in seconds; must be >= 1.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $keyOrResolver is empty, $max < 1, or $perSeconds < 1.
+     *
+     * @see PipelineBuilder::rateLimit() for full semantics, throws, and zero-overhead contract.
+     */
+    public function rateLimit(string|Closure $keyOrResolver, int $max, int $perSeconds): static
+    {
+        $this->builder->rateLimit($keyOrResolver, $max, $perSeconds);
+
+        return $this;
+    }
+
+    /**
+     * Proxies PipelineBuilder::maxConcurrent() and returns the wrapper for chainability.
+     *
+     * Configure a pipeline-level concurrency-limit policy gated at admission
+     * time. Last-write-wins. Zero-overhead when NOT called.
+     *
+     * @param string|Closure(?PipelineContext): string $keyOrResolver Literal key string OR Closure invoked at admission time with the resolved context returning the key.
+     * @param int $limit Maximum number of pipelines admitted simultaneously on the same resolved key; must be >= 1.
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $keyOrResolver is empty or $limit < 1.
+     *
+     * @see PipelineBuilder::maxConcurrent() for full semantics, throws, atomicity caveats, and zero-overhead contract.
+     */
+    public function maxConcurrent(string|Closure $keyOrResolver, int $limit): static
+    {
+        $this->builder->maxConcurrent($keyOrResolver, $limit);
+
+        return $this;
+    }
+
+    /**
      * Proxies PipelineBuilder::send() and returns the wrapper for chainability.
      *
      * Set the context to inject into the pipeline at execution time.
@@ -561,6 +604,23 @@ class PendingPipelineDispatch
     public function shouldBeQueued(): static
     {
         $this->builder->shouldBeQueued();
+
+        return $this;
+    }
+
+    /**
+     * Proxies PipelineBuilder::dispatchEvents() and returns the wrapper for chainability.
+     *
+     * Opt in to Laravel event dispatch for PipelineStepCompleted,
+     * PipelineStepFailed, and PipelineCompleted during execution. Zero-overhead
+     * when NOT called; idempotent on repeated calls. See
+     * {@see PipelineBuilder::dispatchEvents()} for full semantics.
+     *
+     * @return static
+     */
+    public function dispatchEvents(): static
+    {
+        $this->builder->dispatchEvents();
 
         return $this;
     }
