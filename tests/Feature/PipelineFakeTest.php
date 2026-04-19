@@ -14,6 +14,7 @@ use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
+use Vherbaut\LaravelPipelineJobs\Testing\FakePipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderPlacedEvent;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
@@ -734,4 +735,94 @@ it('Pipeline::fake()->recording() fires pipeline events when dispatchEvents() is
 
     Event::assertDispatchedTimes(PipelineStepCompleted::class, 2);
     Event::assertDispatchedTimes(PipelineCompleted::class, 1);
+});
+
+// Story 9.2 — FakePipelineBuilder::reverse() passthrough (Task 6; AC #14, #15)
+
+it('Pipeline::fake()->make([A, B, C])->reverse() records the pipeline with reversed step order (AC #14)', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobC::class,
+    ])->reverse()->send(new SimpleContext)->run();
+
+    Pipeline::assertPipelineRanWith([
+        TrackExecutionJobC::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobA::class,
+    ]);
+});
+
+it('Pipeline::fake()->recording()->make([A, B, C])->reverse()->run() executes reversed sub-steps in reversed order (AC #15)', function (): void {
+    Pipeline::fake()->recording();
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobC::class,
+    ])->reverse()->send(new SimpleContext)->run();
+
+    Pipeline::assertStepsExecutedInOrder([
+        TrackExecutionJobC::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobA::class,
+    ]);
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([
+        TrackExecutionJobC::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobA::class,
+    ]);
+});
+
+it('FakePipelineBuilder::reverse() returns a NEW fake builder instance distinct from the receiver (AC #14)', function (): void {
+    Pipeline::fake();
+
+    $original = Pipeline::make([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+    ]);
+
+    $reversed = $original->reverse();
+
+    expect($reversed)->toBeInstanceOf(FakePipelineBuilder::class)
+        ->and($reversed)->not->toBe($original);
+});
+
+it('Pipeline::fake()->recording()->reverse() with dispatchEvents() fires PipelineStepCompleted in reversed order (AC #15)', function (): void {
+    Pipeline::fake()->recording();
+    Event::fake([
+        PipelineStepCompleted::class,
+        PipelineCompleted::class,
+    ]);
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+    ])
+        ->reverse()
+        ->dispatchEvents()
+        ->send(new SimpleContext)
+        ->run();
+
+    Event::assertDispatchedTimes(PipelineStepCompleted::class, 2);
+    Event::assertDispatchedTimes(PipelineCompleted::class, 1);
+
+    // Inspect dispatch order by collecting the step class names in the order
+    // the events fired — reversed order is [B, A].
+    $stepOrder = [];
+    Event::assertDispatched(PipelineStepCompleted::class, function (PipelineStepCompleted $event) use (&$stepOrder): bool {
+        $stepOrder[] = $event->stepClass;
+
+        return true;
+    });
+
+    expect($stepOrder)->toBe([
+        TrackExecutionJobB::class,
+        TrackExecutionJobA::class,
+    ]);
 });

@@ -649,6 +649,34 @@ final class FakePipelineBuilder
     }
 
     /**
+     * Return a new FakePipelineBuilder wrapping a reversed inner PipelineBuilder.
+     *
+     * Delegates to {@see PipelineBuilder::reverse()} with identical semantics:
+     * the returned fake builder wraps a NEW underlying PipelineBuilder whose
+     * outer-position steps are reversed, and carries the same PipelineFake
+     * reference plus the currently registered return callback slot. The
+     * original fake remains untouched and available for further configuration
+     * and assertion against subsequent runs.
+     *
+     * Recording-mode parity: when the enclosing fake was switched into
+     * recording mode via {@see PipelineFake::recording()},
+     * {@see self::executeWithRecording()} consumes the reversed definition
+     * exactly as any non-reversed definition, so recorded step order and any
+     * opt-in PipelineStepCompleted / PipelineCompleted events fire in the
+     * reversed order.
+     *
+     * @return static A NEW FakePipelineBuilder wrapping a reversed inner builder.
+     */
+    public function reverse(): static
+    {
+        $clone = new self($this->fake);
+        $clone->builder = $this->builder->reverse();
+        $clone->returnCallback = $this->returnCallback;
+
+        return $clone;
+    }
+
+    /**
      * Build an immutable PipelineDefinition from the accumulated steps.
      *
      * @return PipelineDefinition The immutable pipeline description.

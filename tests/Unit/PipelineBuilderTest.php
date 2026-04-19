@@ -1425,3 +1425,209 @@ it('returns the same builder instance from dispatchEvents() for fluent chaining'
 
     expect($builder->dispatchEvents())->toBe($builder);
 });
+
+// Story 9.2 — PipelineBuilder::reverse() (Task 1; AC #1, #2, #4, #5, #6, #7, #12)
+
+it('reverse() returns a distinct PipelineBuilder instance (AC #2)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class]);
+
+    $reversed = $original->reverse();
+
+    expect($reversed)->toBeInstanceOf(PipelineBuilder::class)
+        ->and($reversed)->not->toBe($original);
+});
+
+it('reverse() does not mutate the receiver (AC #1)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class, FakeJobC::class]);
+
+    $original->reverse();
+
+    $definition = $original->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobA::class)
+        ->and($definition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobC::class);
+});
+
+it('reverse() reverses outer-position steps (AC #3, #4 outer positions)', function (): void {
+    $reversed = (new PipelineBuilder([FakeJobA::class, FakeJobB::class, FakeJobC::class]))->reverse();
+
+    $definition = $reversed->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0])->toBeInstanceOf(StepDefinition::class)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobC::class)
+        ->and($definition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('reverse() preserves ParallelStepGroup inner contents (AC #4)', function (): void {
+    $group = ParallelStepGroup::fromArray([FakeJobB::class, TrackExecutionJobA::class]);
+
+    $reversed = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->addParallelGroup($group)
+        ->step(FakeJobC::class)
+        ->reverse();
+
+    $definition = $reversed->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0])->toBeInstanceOf(StepDefinition::class)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobC::class)
+        ->and($definition->steps[1])->toBe($group)
+        ->and($definition->steps[1]->steps[0]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[1]->steps[1]->jobClass)->toBe(TrackExecutionJobA::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('reverse() preserves NestedPipeline inner contents (AC #4)', function (): void {
+    $inner = JobPipeline::make([FakeJobB::class, TrackExecutionJobA::class]);
+    $nested = NestedPipeline::fromBuilder($inner);
+
+    $reversed = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->addNestedPipeline($nested)
+        ->step(FakeJobC::class)
+        ->reverse();
+
+    $definition = $reversed->build();
+
+    expect($definition->steps)->toHaveCount(3)
+        ->and($definition->steps[0]->jobClass)->toBe(FakeJobC::class)
+        ->and($definition->steps[1])->toBe($nested)
+        ->and($definition->steps[1]->definition->steps[0]->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[1]->definition->steps[1]->jobClass)->toBe(TrackExecutionJobA::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('reverse() preserves ConditionalBranch branches map (AC #4)', function (): void {
+    $selector = fn ($ctx) => 'premium';
+    $branch = ConditionalBranch::fromArray($selector, ['premium' => FakeJobB::class, 'basic' => TrackExecutionJobA::class]);
+
+    $reversed = (new PipelineBuilder)
+        ->step(FakeJobA::class)
+        ->addConditionalBranch($branch)
+        ->step(FakeJobC::class)
+        ->reverse();
+
+    $definition = $reversed->build();
+
+    expect($definition->steps[0]->jobClass)->toBe(FakeJobC::class)
+        ->and($definition->steps[1])->toBe($branch)
+        ->and($definition->steps[1]->selector)->toBe($selector)
+        ->and(array_keys($definition->steps[1]->branches))->toBe(['premium', 'basic'])
+        ->and($definition->steps[1]->branches['premium']->jobClass)->toBe(FakeJobB::class)
+        ->and($definition->steps[1]->branches['basic']->jobClass)->toBe(TrackExecutionJobA::class)
+        ->and($definition->steps[2]->jobClass)->toBe(FakeJobA::class);
+});
+
+it('reverse() propagates every pipeline-level state field (AC #5)', function (): void {
+    $context = new SimpleContext;
+    $returnClosure = fn ($ctx) => 'returned';
+    $beforeEach = fn () => null;
+    $afterEach = fn () => null;
+    $onFailedHook = fn () => null;
+    $onSuccessCallback = fn () => null;
+    $onFailureCallback = fn () => null;
+    $onCompleteCallback = fn () => null;
+
+    $builder = (new PipelineBuilder([FakeJobA::class, FakeJobB::class]))
+        ->send($context)
+        ->shouldBeQueued()
+        ->dispatchEvents()
+        ->return($returnClosure)
+        ->onFailure(FailStrategy::StopAndCompensate)
+        ->onFailure($onFailureCallback)
+        ->defaultQueue('default-q')
+        ->defaultConnection('default-c')
+        ->defaultRetry(5)
+        ->defaultBackoff(7)
+        ->defaultTimeout(11)
+        ->beforeEach($beforeEach)
+        ->afterEach($afterEach)
+        ->onStepFailed($onFailedHook)
+        ->onSuccess($onSuccessCallback)
+        ->onComplete($onCompleteCallback);
+
+    $reversed = $builder->reverse();
+    $definition = $reversed->build();
+
+    expect($reversed->getContext())->toBe($context)
+        ->and($definition->shouldBeQueued)->toBeTrue()
+        ->and($definition->dispatchEvents)->toBeTrue()
+        ->and($definition->failStrategy)->toBe(FailStrategy::StopAndCompensate)
+        ->and($definition->defaultQueue)->toBe('default-q')
+        ->and($definition->defaultConnection)->toBe('default-c')
+        ->and($definition->defaultRetry)->toBe(5)
+        ->and($definition->defaultBackoff)->toBe(7)
+        ->and($definition->defaultTimeout)->toBe(11)
+        ->and($definition->beforeEachHooks)->toHaveCount(1)
+        ->and($definition->beforeEachHooks[0])->toBe($beforeEach)
+        ->and($definition->afterEachHooks)->toHaveCount(1)
+        ->and($definition->afterEachHooks[0])->toBe($afterEach)
+        ->and($definition->onStepFailedHooks)->toHaveCount(1)
+        ->and($definition->onStepFailedHooks[0])->toBe($onFailedHook)
+        ->and($definition->onSuccess)->toBe($onSuccessCallback)
+        ->and($definition->onFailure)->toBe($onFailureCallback)
+        ->and($definition->onComplete)->toBe($onCompleteCallback);
+});
+
+it('double reverse yields a builder whose steps equal the original by identity (AC #6)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class, FakeJobC::class]);
+    $originalSteps = $original->build()->steps;
+
+    $doubleReversed = $original->reverse()->reverse();
+    $doubleReversedSteps = $doubleReversed->build()->steps;
+
+    expect($doubleReversedSteps)->toHaveCount(3)
+        ->and($doubleReversedSteps[0])->toBe($originalSteps[0])
+        ->and($doubleReversedSteps[1])->toBe($originalSteps[1])
+        ->and($doubleReversedSteps[2])->toBe($originalSteps[2]);
+});
+
+it('mutations on the original builder after reverse() do not leak into the reversed builder (AC #7)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class]);
+    $reversed = $original->reverse();
+
+    $original->step(FakeJobC::class)->beforeEach(fn () => null);
+
+    $reversedDefinition = $reversed->build();
+
+    expect($reversedDefinition->steps)->toHaveCount(2)
+        ->and($reversedDefinition->steps[0]->jobClass)->toBe(FakeJobB::class)
+        ->and($reversedDefinition->steps[1]->jobClass)->toBe(FakeJobA::class)
+        ->and($reversedDefinition->beforeEachHooks)->toHaveCount(0);
+});
+
+it('mutations on the reversed builder after reverse() do not leak back to the original (AC #7)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class, FakeJobB::class]);
+    $reversed = $original->reverse();
+
+    $reversed->step(FakeJobC::class)->afterEach(fn () => null);
+
+    $originalDefinition = $original->build();
+
+    expect($originalDefinition->steps)->toHaveCount(2)
+        ->and($originalDefinition->steps[0]->jobClass)->toBe(FakeJobA::class)
+        ->and($originalDefinition->steps[1]->jobClass)->toBe(FakeJobB::class)
+        ->and($originalDefinition->afterEachHooks)->toHaveCount(0);
+});
+
+it('reverse() on a zero-step receiver yields an empty reversed builder that still throws on build() (AC #12)', function (): void {
+    $reversed = (new PipelineBuilder)->reverse();
+
+    expect(fn () => $reversed->build())
+        ->toThrow(InvalidPipelineDefinition::class, 'A pipeline must contain at least one step.');
+});
+
+it('reverse() on a single-step receiver yields a single-step reversed builder with a NEW instance (AC #12)', function (): void {
+    $original = new PipelineBuilder([FakeJobA::class]);
+
+    $reversed = $original->reverse();
+
+    expect($reversed)->not->toBe($original)
+        ->and($reversed->build()->steps)->toHaveCount(1)
+        ->and($reversed->build()->steps[0]->jobClass)->toBe(FakeJobA::class);
+});

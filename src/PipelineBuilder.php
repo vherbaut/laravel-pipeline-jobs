@@ -988,6 +988,107 @@ final class PipelineBuilder
     }
 
     /**
+     * Return a new PipelineBuilder whose outer-position steps are the receiver's steps in reverse order.
+     *
+     * Rationale and scope:
+     * - reverse() is a construction helper, NOT a separate execution mode. It
+     *   produces a DISTINCT PipelineBuilder instance whose internal $steps
+     *   array is the reverse of the receiver's, and whose every other
+     *   pipeline-level field is copied verbatim. The receiver is never
+     *   mutated: its $steps array and its observable build() output remain
+     *   identical to what they would have been without the reverse() call.
+     * - The returned builder produces its own PipelineDefinition on build();
+     *   all existing executors (SyncExecutor, QueuedExecutor, RecordingExecutor)
+     *   consume that reversed definition identically to any non-reversed one.
+     *   No new executor, no new manifest shape, no new queued wrapper, no new
+     *   event are introduced by reversal.
+     *
+     * Outer-position-only reversal:
+     * - ParallelStepGroup, NestedPipeline, and ConditionalBranch entries each
+     *   occupy ONE outer position and are reversed alongside flat
+     *   StepDefinition entries at that outer level; their inner contents are
+     *   preserved verbatim.
+     * - Parallel sub-steps are conceptually concurrent, so an inner reversal
+     *   would be semantically meaningless.
+     * - Nested inner pipelines are reusable, self-contained units; recursive
+     *   reversal would make reverse() non-composable. Users needing reversed
+     *   inner order must call reverse() on the inner builder BEFORE wrapping
+     *   it via ->nest(...).
+     * - Conditional branches are a key-indexed map, not an ordered sequence;
+     *   the concept of "reverse" does not apply to their branches map.
+     *
+     * Pipeline-level state propagation:
+     * - Every non-step field transfers to the new builder by shallow-copy:
+     *   stored context or context closure (send()), queued flag
+     *   (shouldBeQueued()), dispatch-events flag (dispatchEvents()), return
+     *   callback (return()), fail strategy and failure callback (onFailure()),
+     *   pipeline-level defaults (defaultQueue, defaultConnection,
+     *   defaultRetry, defaultBackoff, defaultTimeout), hook arrays
+     *   (beforeEachHooks, afterEachHooks, onStepFailedHooks), and callback
+     *   slots (onSuccessCallback, onFailureCallback, onCompleteCallback).
+     *
+     * Idempotency and independence:
+     * - Period-2 idempotent: reverse()->reverse() yields a distinct NEW builder
+     *   whose steps array is equal to the receiver's by value (same step
+     *   objects captured by reference; StepDefinition / ParallelStepGroup /
+     *   NestedPipeline / ConditionalBranch are all immutable value objects).
+     * - Independence after split: mutations applied to the ORIGINAL builder
+     *   after reverse() returns (e.g., adding a further ->step(...),
+     *   registering an additional beforeEach hook) do NOT affect the reversed
+     *   builder's subsequent build() output, and vice versa. PHP array
+     *   copy-on-write gives each builder its own branch of the step and hook
+     *   arrays once either side mutates. Closures and readonly value objects
+     *   are shared by reference but neither can be mutated, so sharing is
+     *   safe.
+     *
+     * Edge cases:
+     * - Empty receiver: reverse() may be called on a builder whose $steps is
+     *   empty; the returned builder is also empty. Building either builder
+     *   throws InvalidPipelineDefinition::emptySteps() at build() time per
+     *   the existing contract; no new exception is introduced.
+     * - Single-step receiver: [A]->reverse()->build()->steps equals [A] by
+     *   value; identity check from @see AC #2 still requires a NEW builder
+     *   instance.
+     *
+     * Condition and compensation preservation:
+     * - Steps carrying when() / unless() closures retain their condition
+     *   after reversal; the closure fires at runtime against the live context
+     *   at the step's NEW position.
+     * - Steps carrying compensateWith(...) retain their compensation class;
+     *   when that step's compensation eventually runs under StopAndCompensate,
+     *   it runs in the reverse order of the REVERSED execution (not the
+     *   original declaration order) because the compensation chain follows
+     *   the execution-order completedSteps list.
+     *
+     * @return static A NEW PipelineBuilder instance with outer-position steps reversed and every pipeline-level field copied verbatim.
+     *
+     * @see PipelineBuilder::build() for the downstream PipelineDefinition contract consumed by all executors.
+     */
+    public function reverse(): static
+    {
+        $clone = new self;
+        $clone->steps = array_reverse($this->steps);
+        $clone->context = $this->context;
+        $clone->shouldBeQueued = $this->shouldBeQueued;
+        $clone->dispatchEvents = $this->dispatchEvents;
+        $clone->returnCallback = $this->returnCallback;
+        $clone->failStrategy = $this->failStrategy;
+        $clone->defaultQueue = $this->defaultQueue;
+        $clone->defaultConnection = $this->defaultConnection;
+        $clone->defaultRetry = $this->defaultRetry;
+        $clone->defaultBackoff = $this->defaultBackoff;
+        $clone->defaultTimeout = $this->defaultTimeout;
+        $clone->beforeEachHooks = $this->beforeEachHooks;
+        $clone->afterEachHooks = $this->afterEachHooks;
+        $clone->onStepFailedHooks = $this->onStepFailedHooks;
+        $clone->onSuccessCallback = $this->onSuccessCallback;
+        $clone->onFailureCallback = $this->onFailureCallback;
+        $clone->onCompleteCallback = $this->onCompleteCallback;
+
+        return $clone;
+    }
+
+    /**
      * Build an immutable PipelineDefinition from the accumulated steps.
      *
      * @return PipelineDefinition The immutable pipeline description ready for execution.
