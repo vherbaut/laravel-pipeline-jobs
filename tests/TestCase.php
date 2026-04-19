@@ -19,6 +19,22 @@ class TestCase extends Orchestra
     }
 
     /**
+     * Configure the test environment with deterministic defaults.
+     *
+     * The `array` cache driver is pinned explicitly so that facade spies on
+     * `RateLimiter` and `Cache` can resolve the container singletons without
+     * tripping over a null store when Testbench defaults vary between
+     * Laravel minor versions.
+     *
+     * @param Application $app
+     * @return void
+     */
+    protected function getEnvironmentSetUp($app): void
+    {
+        $app['config']->set('cache.default', 'array');
+    }
+
+    /**
      * Get the package aliases registered in the test application.
      *
      * Mirrors the composer.json `extra.laravel.aliases` declaration so that
