@@ -23,7 +23,7 @@ use Vherbaut\LaravelPipelineJobs\Execution\Shared\CompensationInvoker;
  * - If the compensation implements CompensableJob, calls `compensate($context)`
  *   (via {@see CompensationInvoker::invokeCompensate()}).
  * - Otherwise, injects the manifest into a `pipelineManifest` property when
- *   present, then calls `handle()` via the container (Story 3.3 pattern).
+ *   present, then calls `handle()` via the container (legacy pattern).
  *
  * Compensation is best-effort: a throwable from one compensation is logged
  * and event-dispatched via {@see CompensationInvoker::reportCompensationFailure()},

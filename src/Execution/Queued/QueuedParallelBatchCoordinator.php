@@ -18,6 +18,7 @@ use Vherbaut\LaravelPipelineJobs\Execution\CompensationStepJob;
 use Vherbaut\LaravelPipelineJobs\Execution\ParallelContextMerger;
 use Vherbaut\LaravelPipelineJobs\Execution\ParallelStepJob;
 use Vherbaut\LaravelPipelineJobs\Execution\PipelineStepJob;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 
 /**
  * Queued parallel-group fan-out / fan-in coordinator.
@@ -260,6 +261,14 @@ final class QueuedParallelBatchCoordinator
         foreach ($subStepClasses as $subIndex => $subStepClass) {
             if (($succeededIndices[$subIndex] ?? false) === true) {
                 $manifest->markStepCompleted($subStepClass);
+
+                // Each succeeded parallel sub-step fires PipelineStepCompleted
+                // at fan-in time. ParallelStepJob cannot dispatch from inside
+                // the worker that ran the sub-step; the fan-in batch callback
+                // runs in a single worker and observes the success signal per
+                // sub-step, which is the single authoritative place we can
+                // hook the event.
+                PipelineEventDispatcher::fireStepCompleted($manifest, $groupIndex, $subStepClass);
             }
         }
 
@@ -277,6 +286,22 @@ final class QueuedParallelBatchCoordinator
             $failureException = new StepExecutionFailed(
                 "Pipeline [{$pipelineId}] parallel group at position {$groupIndex} failed under {$strategy->name}.",
             );
+
+            // Each failed sub-step fires PipelineStepFailed with the
+            // aggregate batch exception. The raw per-sub-step exception
+            // is not exposed by Laravel's Batch API to the finally()
+            // callback, so listeners wanting concrete failure detail should
+            // log inside the sub-step or register for onStepFailed hooks.
+            foreach ($subStepClasses as $subIndex => $subStepClass) {
+                if (($succeededIndices[$subIndex] ?? false) === false) {
+                    PipelineEventDispatcher::fireStepFailed(
+                        $manifest,
+                        $groupIndex,
+                        $subStepClass,
+                        $failureException,
+                    );
+                }
+            }
 
             Log::error('Pipeline parallel batch reported failures', [
                 'pipelineId' => $pipelineId,
@@ -322,6 +347,11 @@ final class QueuedParallelBatchCoordinator
                 }
             }
 
+            // PipelineCompleted fires once at the terminal failure exit
+            // of a parallel batch under StopImmediately /
+            // StopAndCompensate, AFTER onFailure + onComplete callbacks.
+            PipelineEventDispatcher::fireCompleted($manifest);
+
             return;
         }
 
@@ -344,6 +374,12 @@ final class QueuedParallelBatchCoordinator
         if ($manifest->onCompleteCallback !== null) {
             ($manifest->onCompleteCallback->getClosure())($manifest->context);
         }
+
+        // PipelineCompleted fires once when a parallel group is the last
+        // position in the pipeline and the fan-in reaches the terminal
+        // success tail (no more positions to dispatch after the
+        // group).
+        PipelineEventDispatcher::fireCompleted($manifest);
     }
 
     /**

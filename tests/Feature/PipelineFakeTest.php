@@ -2,17 +2,26 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\RateLimiter;
 use PHPUnit\Framework\AssertionFailedError;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
+use Vherbaut\LaravelPipelineJobs\Events\PipelineCompleted;
+use Vherbaut\LaravelPipelineJobs\Events\PipelineStepCompleted;
+use Vherbaut\LaravelPipelineJobs\Events\PipelineStepFailed;
+use Vherbaut\LaravelPipelineJobs\Exceptions\PipelineThrottled;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvocationDispatcher;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
+use Vherbaut\LaravelPipelineJobs\Testing\FakePipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Events\TestOrderPlacedEvent;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ActionEnrichJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\EnrichContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FailingThenSucceedingJob;
@@ -21,6 +30,7 @@ use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobB;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\FakeJobC;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\HookRecorder;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\IncrementCountJob;
+use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\MiddlewareEnrichJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\ReadContextJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJob;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\TrackExecutionJobA;
@@ -31,6 +41,9 @@ beforeEach(function (): void {
     TrackExecutionJob::$executionOrder = [];
     ReadContextJob::$readName = null;
     HookRecorder::reset();
+    StepInvocationDispatcher::clearCache();
+    MiddlewareEnrichJob::$invocations = 0;
+    ActionEnrichJob::$invocations = 0;
 });
 
 it('fakes a pipeline in a service-like context and asserts dispatch', function (): void {
@@ -194,7 +207,7 @@ it('skips the return closure in recording mode when a step fails and returns nul
     Pipeline::assertStepNotExecuted(FailingJob::class);
 });
 
-// --- Story 6.1: Per-step lifecycle hooks on PipelineFake / FakePipelineBuilder ---
+// --- Per-step lifecycle hooks on PipelineFake / FakePipelineBuilder ---
 
 it('fires registered hooks in Pipeline::fake()->recording() mode', function (): void {
     Pipeline::fake()->recording();
@@ -248,7 +261,7 @@ it('exposes beforeEach/afterEach/onStepFailed on FakePipelineBuilder delegating 
         ->and($recorded->definition->onStepFailedHooks)->toBe([$failedHook]);
 });
 
-// --- Story 6.2: Pipeline-level callbacks on PipelineFake / FakePipelineBuilder ---
+// --- Pipeline-level callbacks on PipelineFake / FakePipelineBuilder ---
 
 it('pipeline-level: fires onSuccess and onComplete in Pipeline::fake()->recording() mode', function (): void {
     Pipeline::fake()->recording();
@@ -594,7 +607,7 @@ it('Pipeline::fake()->recording() replays a parallel group sequentially through 
     ]);
 });
 
-// --- Story 8.2: NestedPipeline assertions -------------------------------------------------
+// --- NestedPipeline assertions -------------------------------------------------
 
 it('records a nested pipeline in the recorded definition steps array', function (): void {
     Pipeline::fake();
@@ -696,4 +709,238 @@ it('Pipeline::fake()->recording() replays the selected branch through RecordingE
         TrackExecutionJobA::class,
         TrackExecutionJobB::class,
     ]);
+});
+
+it('Pipeline::fake() without recording does NOT fire pipeline events even with dispatchEvents()', function (): void {
+    Pipeline::fake();
+    Event::fake([
+        PipelineStepCompleted::class,
+        PipelineStepFailed::class,
+        PipelineCompleted::class,
+    ]);
+
+    Pipeline::make([TrackExecutionJobA::class])
+        ->dispatchEvents()
+        ->send(new SimpleContext)
+        ->run();
+
+    Event::assertNotDispatched(PipelineStepCompleted::class);
+    Event::assertNotDispatched(PipelineStepFailed::class);
+    Event::assertNotDispatched(PipelineCompleted::class);
+});
+
+it('Pipeline::fake()->recording() fires pipeline events when dispatchEvents() is enabled', function (): void {
+    Pipeline::fake()->recording();
+    Event::fake([
+        PipelineStepCompleted::class,
+        PipelineCompleted::class,
+    ]);
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::make([TrackExecutionJobA::class, TrackExecutionJobB::class])
+        ->dispatchEvents()
+        ->send(new SimpleContext)
+        ->run();
+
+    Event::assertDispatchedTimes(PipelineStepCompleted::class, 2);
+    Event::assertDispatchedTimes(PipelineCompleted::class, 1);
+});
+
+// FakePipelineBuilder::reverse() passthrough
+
+it('Pipeline::fake()->make([A, B, C])->reverse() records the pipeline with reversed step order (AC #14)', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobC::class,
+    ])->reverse()->send(new SimpleContext)->run();
+
+    Pipeline::assertPipelineRanWith([
+        TrackExecutionJobC::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobA::class,
+    ]);
+});
+
+it('Pipeline::fake()->recording()->make([A, B, C])->reverse()->run() executes reversed sub-steps in reversed order (AC #15)', function (): void {
+    Pipeline::fake()->recording();
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobC::class,
+    ])->reverse()->send(new SimpleContext)->run();
+
+    Pipeline::assertStepsExecutedInOrder([
+        TrackExecutionJobC::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobA::class,
+    ]);
+
+    expect(TrackExecutionJob::$executionOrder)->toBe([
+        TrackExecutionJobC::class,
+        TrackExecutionJobB::class,
+        TrackExecutionJobA::class,
+    ]);
+});
+
+it('FakePipelineBuilder::reverse() returns a NEW fake builder instance distinct from the receiver (AC #14)', function (): void {
+    Pipeline::fake();
+
+    $original = Pipeline::make([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+    ]);
+
+    $reversed = $original->reverse();
+
+    expect($reversed)->toBeInstanceOf(FakePipelineBuilder::class)
+        ->and($reversed)->not->toBe($original);
+});
+
+it('Pipeline::fake()->recording()->reverse() with dispatchEvents() fires PipelineStepCompleted in reversed order (AC #15)', function (): void {
+    Pipeline::fake()->recording();
+    Event::fake([
+        PipelineStepCompleted::class,
+        PipelineCompleted::class,
+    ]);
+    TrackExecutionJob::$executionOrder = [];
+
+    Pipeline::make([
+        TrackExecutionJobA::class,
+        TrackExecutionJobB::class,
+    ])
+        ->reverse()
+        ->dispatchEvents()
+        ->send(new SimpleContext)
+        ->run();
+
+    Event::assertDispatchedTimes(PipelineStepCompleted::class, 2);
+    Event::assertDispatchedTimes(PipelineCompleted::class, 1);
+
+    // Inspect dispatch order by collecting the step class names in the order
+    // the events fired — reversed order is [B, A].
+    $stepOrder = [];
+    Event::assertDispatched(PipelineStepCompleted::class, function (PipelineStepCompleted $event) use (&$stepOrder): bool {
+        $stepOrder[] = $event->stepClass;
+
+        return true;
+    });
+
+    expect($stepOrder)->toBe([
+        TrackExecutionJobB::class,
+        TrackExecutionJobA::class,
+    ]);
+});
+
+// FakePipelineBuilder rateLimit() / maxConcurrent() passthroughs
+
+it('Pipeline::fake() rateLimit() is inert in default fake mode (no Cache or RateLimiter calls)', function (): void {
+    Cache::spy();
+    RateLimiter::spy();
+    Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class])->rateLimit('k', 1, 60)->run();
+
+    RateLimiter::shouldNotHaveReceived('hit');
+    RateLimiter::shouldNotHaveReceived('tooManyAttempts');
+    Cache::shouldNotHaveReceived('increment');
+});
+
+it('Pipeline::fake() maxConcurrent() is inert in default fake mode (no Cache calls)', function (): void {
+    Cache::spy();
+    Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class])->maxConcurrent('k', 1)->run();
+
+    Cache::shouldNotHaveReceived('add');
+    Cache::shouldNotHaveReceived('increment');
+});
+
+it('Pipeline::fake()->recording() rateLimit() ACTIVELY gates via the real RateLimiter', function (): void {
+    Cache::flush();
+    RateLimiter::clear('k');
+    Pipeline::fake()->recording();
+
+    Pipeline::make([FakeJobA::class])->rateLimit('k', 1, 60)->run();
+
+    expect(static fn () => Pipeline::make([FakeJobA::class])->rateLimit('k', 1, 60)->run())
+        ->toThrow(PipelineThrottled::class);
+
+    RateLimiter::clear('k');
+});
+
+it('Pipeline::fake()->recording() maxConcurrent() ACTIVELY gates and releases on success', function (): void {
+    Cache::flush();
+    Pipeline::fake()->recording();
+
+    Pipeline::make([FakeJobA::class])->maxConcurrent('k', 2)->run();
+
+    expect(Cache::get('pipeline:concurrent:k'))->toBe(0);
+});
+
+it('FakePipelineBuilder rateLimit() and maxConcurrent() return $this for chainability', function (): void {
+    $fake = Pipeline::fake();
+    $builder = $fake->make([FakeJobA::class]);
+
+    expect($builder->rateLimit('k', 1, 60))->toBe($builder)
+        ->and($builder->maxConcurrent('k', 1))->toBe($builder);
+});
+
+// -----------------------------------------------------------------------------
+// Recording-mode parity for middleware/Action shapes
+// -----------------------------------------------------------------------------
+
+it('records middleware-shape step execution under Pipeline::fake()->recording()', function (): void {
+    Pipeline::fake()->recording();
+
+    Pipeline::make([MiddlewareEnrichJob::class])
+        ->send(new SimpleContext)
+        ->run();
+
+    Pipeline::assertStepExecuted(MiddlewareEnrichJob::class);
+    expect(MiddlewareEnrichJob::$invocations)->toBe(1);
+});
+
+it('records Action-shape step execution under Pipeline::fake()->recording()', function (): void {
+    Pipeline::fake()->recording();
+
+    Pipeline::make([ActionEnrichJob::class])
+        ->send(new SimpleContext)
+        ->run();
+
+    Pipeline::assertStepExecuted(ActionEnrichJob::class);
+    expect(ActionEnrichJob::$invocations)->toBe(1);
+});
+
+it('records mixed step types in declared order under recording mode', function (): void {
+    Pipeline::fake()->recording();
+
+    Pipeline::make([
+        EnrichContextJob::class,
+        MiddlewareEnrichJob::class,
+        ActionEnrichJob::class,
+    ])
+        ->send(new SimpleContext)
+        ->run();
+
+    Pipeline::assertStepsExecutedInOrder([
+        EnrichContextJob::class,
+        MiddlewareEnrichJob::class,
+        ActionEnrichJob::class,
+    ]);
+});
+
+it('default Pipeline::fake() mode does not invoke middleware/action handlers', function (): void {
+    Pipeline::fake();
+
+    Pipeline::make([MiddlewareEnrichJob::class, ActionEnrichJob::class])
+        ->send(new SimpleContext)
+        ->run();
+
+    expect(MiddlewareEnrichJob::$invocations)->toBe(0)
+        ->and(ActionEnrichJob::$invocations)->toBe(0);
 });

@@ -111,7 +111,7 @@ The cursor is automatically advanced by `advanceCursorOrOuter()` after each comp
 
 ## Configuration and defaults
 
-Outer pipeline level defaults (`defaultQueue()`, `defaultConnection()`, `defaultRetry()`, `defaultBackoff()`, `defaultTimeout()`) apply to each outer step **unless** overridden by a `Step::make(...)->onQueue(...)`. Sub steps of a `NestedPipeline` use the defaults of **their own** inner `PipelineDefinition`, **not** those of the outer pipeline (rule from Story 8.2).
+Outer pipeline level defaults (`defaultQueue()`, `defaultConnection()`, `defaultRetry()`, `defaultBackoff()`, `defaultTimeout()`) apply to each outer step **unless** overridden by a `Step::make(...)->onQueue(...)`. Sub steps of a `NestedPipeline` use the defaults of **their own** inner `PipelineDefinition`, **not** those of the outer pipeline.
 
 This lets you compose a reusable pipeline with its own queue / retry policy without having the outer pipeline contaminate it :
 

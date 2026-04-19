@@ -18,7 +18,9 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\PipelineExecutor;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\CompensationInvoker;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvocationDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -64,10 +66,10 @@ final class RecordingExecutor implements PipelineExecutor
      * Execute all steps synchronously, capturing context snapshots after each step.
      *
      * Mirrors SyncExecutor::execute() behaviorally: fires the three
-     * Story 6.1 lifecycle hooks (beforeEach before handle(), afterEach
+     * per-step lifecycle hooks (beforeEach before handle(), afterEach
      * after successful handle() and before markStepCompleted(),
      * onStepFailed inside catch before compensation) AND the three
-     * Story 6.2 pipeline-level callbacks (onSuccess + onComplete on the
+     * pipeline-level callbacks (onSuccess + onComplete on the
      * success tail, onFailure + onComplete on the failure path after
      * compensation) so tests using Pipeline::fake()->recording() observe
      * the same contract as SyncExecutor. Hook and callback side effects
@@ -135,7 +137,7 @@ final class RecordingExecutor implements PipelineExecutor
                     $manifest->context,
                 );
 
-                app()->call([$job, 'handle']);
+                StepInvocationDispatcher::call($job, $manifest->context);
 
                 StepInvoker::fireHooks(
                     $manifest->afterEachHooks,
@@ -144,6 +146,13 @@ final class RecordingExecutor implements PipelineExecutor
                 );
 
                 $manifest->markStepCompleted($stepClass);
+
+                // RecordingExecutor mirrors SyncExecutor
+                // event dispatch so Pipeline::fake()->recording() observes the
+                // same event stream as production code. Fires after
+                // markStepCompleted + afterEach hooks.
+                PipelineEventDispatcher::fireStepCompleted($manifest, $stepIndex, $stepClass);
+
                 $manifest->advanceStep();
 
                 $this->executedSteps[] = $stepClass;
@@ -156,8 +165,12 @@ final class RecordingExecutor implements PipelineExecutor
                 $manifest->failedStepClass = $stepClass;
                 $manifest->failedStepIndex = $stepIndex;
 
-                // Story 6.1 AC #7: a throwing onStepFailed bypasses the
-                // FailStrategy branching (no compensation) and is wrapped
+                // PipelineStepFailed fires BEFORE onStepFailed hooks,
+                // matching SyncExecutor ordering.
+                PipelineEventDispatcher::fireStepFailed($manifest, $stepIndex, $stepClass, $exception);
+
+                // A throwing onStepFailed bypasses the FailStrategy
+                // branching (no compensation) and is wrapped
                 // as StepExecutionFailed to mirror SyncExecutor (AC #10
                 // recording/sync parity).
                 try {
@@ -176,7 +189,7 @@ final class RecordingExecutor implements PipelineExecutor
                     );
                 }
 
-                // Story 6.2 AC #10 / AC #13: under SkipAndContinue the
+                // Under SkipAndContinue the
                 // recording executor mirrors SyncExecutor: log the skip,
                 // clear the live Throwable, advance past the failed step,
                 // and resume with the next step. Pipeline-level onFailure
@@ -198,8 +211,8 @@ final class RecordingExecutor implements PipelineExecutor
 
                 $this->runCompensation($manifest);
 
-                // Story 6.2 AC #2, #11, #13: pipeline-level onFailure fires
-                // AFTER per-step onStepFailed AND AFTER compensation AND
+                // Pipeline-level onFailure fires AFTER per-step
+                // onStepFailed AND AFTER compensation AND
                 // BEFORE the terminal rethrow, mirroring SyncExecutor for
                 // recording-mode parity.
                 try {
@@ -230,6 +243,11 @@ final class RecordingExecutor implements PipelineExecutor
                     );
                 }
 
+                // PipelineCompleted fires at the terminal failure exit
+                // of the recording top-level flat-step path
+                // (parity with SyncExecutor AC #8).
+                PipelineEventDispatcher::fireCompleted($manifest);
+
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,
                     $manifest->currentStepIndex,
@@ -239,10 +257,14 @@ final class RecordingExecutor implements PipelineExecutor
             }
         }
 
-        // Story 6.2 AC #1, #13: onSuccess fires on terminal success, then
-        // onComplete. Recording-mode parity with SyncExecutor is load-bearing.
+        // onSuccess fires on terminal success, then onComplete.
+        // Recording-mode parity with SyncExecutor is load-bearing.
         StepInvoker::firePipelineCallback($manifest->onSuccessCallback, $manifest->context);
         StepInvoker::firePipelineCallback($manifest->onCompleteCallback, $manifest->context);
+
+        // PipelineCompleted fires at the terminal success exit
+        // AFTER the onSuccess + onComplete callbacks.
+        PipelineEventDispatcher::fireCompleted($manifest);
 
         return $manifest->context;
     }
@@ -300,7 +322,7 @@ final class RecordingExecutor implements PipelineExecutor
                     $manifest->context,
                 );
 
-                app()->call([$job, 'handle']);
+                StepInvocationDispatcher::call($job, $manifest->context);
 
                 StepInvoker::fireHooks(
                     $manifest->afterEachHooks,
@@ -309,6 +331,11 @@ final class RecordingExecutor implements PipelineExecutor
                 );
 
                 $manifest->markStepCompleted($subStepClass);
+
+                // Recording-mode parallel sub-steps fire PipelineStepCompleted
+                // with the outer group index.
+                PipelineEventDispatcher::fireStepCompleted($manifest, $groupIndex, $subStepClass);
+
                 $this->executedSteps[] = $subStepClass;
 
                 if ($manifest->context !== null) {
@@ -318,6 +345,10 @@ final class RecordingExecutor implements PipelineExecutor
                 $manifest->failureException = $subException;
                 $manifest->failedStepClass = $subStepClass;
                 $manifest->failedStepIndex = $groupIndex;
+
+                // Recording-mode parallel sub-step failure fires
+                // PipelineStepFailed BEFORE hooks.
+                PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $subStepClass, $subException);
 
                 try {
                     StepInvoker::fireHooks(
@@ -378,6 +409,10 @@ final class RecordingExecutor implements PipelineExecutor
                         $subException,
                     );
                 }
+
+                // PipelineCompleted fires at the terminal failure exit
+                // of a recording parallel sub-step.
+                PipelineEventDispatcher::fireCompleted($manifest);
 
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,
@@ -503,7 +538,7 @@ final class RecordingExecutor implements PipelineExecutor
                     $manifest->context,
                 );
 
-                app()->call([$job, 'handle']);
+                StepInvocationDispatcher::call($job, $manifest->context);
 
                 StepInvoker::fireHooks(
                     $manifest->afterEachHooks,
@@ -512,6 +547,11 @@ final class RecordingExecutor implements PipelineExecutor
                 );
 
                 $manifest->markStepCompleted($entry);
+
+                // Recording nested inner flat step fires PipelineStepCompleted
+                // with the top outer group index.
+                PipelineEventDispatcher::fireStepCompleted($manifest, $groupIndex, $entry);
+
                 $this->executedSteps[] = $entry;
 
                 if ($manifest->context !== null) {
@@ -525,6 +565,10 @@ final class RecordingExecutor implements PipelineExecutor
                 $manifest->failureException = $cause;
                 $manifest->failedStepClass = $entry;
                 $manifest->failedStepIndex = $groupIndex;
+
+                // Recording nested inner flat step fires PipelineStepFailed
+                // BEFORE hooks.
+                PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $entry, $cause);
 
                 try {
                     StepInvoker::fireHooks(
@@ -586,6 +630,10 @@ final class RecordingExecutor implements PipelineExecutor
                     );
                 }
 
+                // PipelineCompleted fires at the terminal failure exit
+                // of a recording nested inner step.
+                PipelineEventDispatcher::fireCompleted($manifest);
+
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,
                     $groupIndex,
@@ -630,6 +678,15 @@ final class RecordingExecutor implements PipelineExecutor
             $selectorClosure = $serializableSelector->getClosure();
             $selectedKey = $selectorClosure($manifest->context);
         } catch (Throwable $selectorException) {
+            // Selector failure fires PipelineStepFailed with the
+            // ConditionalBranch<> label.
+            PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $branchWrapperLabel, $selectorException);
+
+            // PipelineCompleted fires at the terminal failure exit of a
+            // recording selector failure (parity with sync mode's
+            // SyncConditionalBranchRunner::handleSelectorFailure).
+            PipelineEventDispatcher::fireCompleted($manifest);
+
             throw StepExecutionFailed::forStep(
                 $manifest->pipelineId,
                 $groupIndex,
@@ -639,11 +696,18 @@ final class RecordingExecutor implements PipelineExecutor
         }
 
         if (! is_string($selectedKey)) {
+            $nonStringFailure = InvalidPipelineDefinition::branchSelectorMustReturnString(get_debug_type($selectedKey));
+            PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $branchWrapperLabel, $nonStringFailure);
+
+            // PipelineCompleted fires at the terminal failure exit of a
+            // recording non-string selector return.
+            PipelineEventDispatcher::fireCompleted($manifest);
+
             throw StepExecutionFailed::forStep(
                 $manifest->pipelineId,
                 $groupIndex,
                 $branchWrapperLabel,
-                InvalidPipelineDefinition::branchSelectorMustReturnString(get_debug_type($selectedKey)),
+                $nonStringFailure,
             );
         }
 
@@ -651,11 +715,18 @@ final class RecordingExecutor implements PipelineExecutor
         $branches = $branchShape['branches'] ?? [];
 
         if (! array_key_exists($selectedKey, $branches)) {
+            $unknownKeyFailure = InvalidPipelineDefinition::unknownBranchKey($selectedKey, array_keys($branches));
+            PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $branchWrapperLabel, $unknownKeyFailure);
+
+            // PipelineCompleted fires at the terminal failure exit of a
+            // recording unknown-key selector return.
+            PipelineEventDispatcher::fireCompleted($manifest);
+
             throw StepExecutionFailed::forStep(
                 $manifest->pipelineId,
                 $groupIndex,
                 $branchWrapperLabel,
-                InvalidPipelineDefinition::unknownBranchKey($selectedKey, array_keys($branches)),
+                $unknownKeyFailure,
             );
         }
 
@@ -728,7 +799,7 @@ final class RecordingExecutor implements PipelineExecutor
                 $manifest->context,
             );
 
-            app()->call([$job, 'handle']);
+            StepInvocationDispatcher::call($job, $manifest->context);
 
             StepInvoker::fireHooks(
                 $manifest->afterEachHooks,
@@ -737,6 +808,11 @@ final class RecordingExecutor implements PipelineExecutor
             );
 
             $manifest->markStepCompleted($selectedClass);
+
+            // Recording selected branch flat step fires PipelineStepCompleted
+            // with the branch group's outer index.
+            PipelineEventDispatcher::fireStepCompleted($manifest, $groupIndex, $selectedClass);
+
             $manifest->advanceStep();
 
             $this->executedSteps[] = $selectedClass;
@@ -752,6 +828,9 @@ final class RecordingExecutor implements PipelineExecutor
             $manifest->failureException = $cause;
             $manifest->failedStepClass = $selectedClass;
             $manifest->failedStepIndex = $groupIndex;
+
+            // Recording selected branch flat step failure fires PipelineStepFailed.
+            PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $selectedClass, $cause);
 
             try {
                 StepInvoker::fireHooks(
@@ -805,6 +884,10 @@ final class RecordingExecutor implements PipelineExecutor
                     $cause,
                 );
             }
+
+            // PipelineCompleted fires at the terminal failure exit of a
+            // recording selected branch's flat step.
+            PipelineEventDispatcher::fireCompleted($manifest);
 
             throw StepExecutionFailed::forStep(
                 $manifest->pipelineId,
@@ -864,11 +947,11 @@ final class RecordingExecutor implements PipelineExecutor
      * Guarded on the manifest's failStrategy: only fires when strategy is
      * FailStrategy::StopAndCompensate AND a compensation mapping exists.
      * StopImmediately and SkipAndContinue both skip compensation entirely
-     * (SkipAndContinue step-level handling is deferred to Story 5.3).
+     * (SkipAndContinue handles failures per-step without running compensation).
      *
      * Uses the CompensableJob-or-trait bridge: instances implementing
      * CompensableJob receive a compensate($context) call; otherwise the
-     * legacy Story 3.3 pattern fires (reflection-injected manifest plus
+     * legacy pattern fires (reflection-injected manifest plus
      * app()->call([$job, 'handle'])). Per-compensation failures are
      * silently swallowed so the chain continues.
      *
@@ -903,6 +986,9 @@ final class RecordingExecutor implements PipelineExecutor
                         $property->setValue($job, $manifest);
                     }
 
+                    // Compensation paths remain on the legacy app()->call() contract;
+                    // middleware/Action support for compensation
+                    // is OUT OF SCOPE.
                     app()->call([$job, 'handle']);
                 }
 

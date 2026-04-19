@@ -23,6 +23,8 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\Queued\QueuedCompensationDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Queued\QueuedConditionalBranchHandler;
 use Vherbaut\LaravelPipelineJobs\Execution\Queued\QueuedParallelBatchCoordinator;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineConcurrencyGate;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -119,8 +121,8 @@ final class PipelineStepJob implements ShouldQueue
      *   not marked failed. A later successful step clears the recorded
      *   failure fields; a later failure overwrites them.
      *
-     * Per-step lifecycle hooks (Story 6.1) fire synchronously in the
-     * current worker process:
+     * Per-step lifecycle hooks fire synchronously in the current
+     * worker process:
      *
      * - beforeEach: fires after the skip check and manifest injection,
      *   immediately before app()->call([$job, 'handle']).
@@ -130,8 +132,7 @@ final class PipelineStepJob implements ShouldQueue
      * - onStepFailed: fires inside the catch block after failure-field
      *   recording on the manifest and BEFORE FailStrategy branching.
      *
-     * Pipeline-level lifecycle callbacks (Story 6.2) fire on the terminal
-     * wrapper only:
+     * Pipeline-level lifecycle callbacks fire on the terminal wrapper only:
      *
      * - On the last wrapper's successful completion (currentStepIndex has
      *   advanced past the last step), onSuccess fires first, then onComplete.
@@ -151,11 +152,11 @@ final class PipelineStepJob implements ShouldQueue
      */
     public function handle(): void
     {
-        // Cursor-aware position resolution (Story 8.2). When the manifest's
+        // Cursor-aware position resolution. When the manifest's
         // nestedCursor is non-empty, the previous wrapper left us inside a
         // nested pipeline at that cursor path; navigate stepClassAt(cursor)
         // to resolve the current entry. Otherwise the cursor-empty path
-        // resolves stepClasses[currentStepIndex] exactly as before Story 8.2.
+        // resolves stepClasses[currentStepIndex] as a flat top-level step.
         [$stepClass, $outerIndex] = $this->resolveCurrentStepClass();
 
         if ($stepClass === null) {
@@ -211,11 +212,11 @@ final class PipelineStepJob implements ShouldQueue
                 $this->manifest->context,
             );
 
-            StepInvoker::invokeWithRetry($job, $this->resolveCurrentConfig());
+            StepInvoker::invokeWithRetry($job, $this->resolveCurrentConfig(), $this->manifest->context);
 
-            // Story 6.1 Task 6.4: afterEach fires INSIDE the try block so a
-            // throwing afterEach is caught by the standard failure path
-            // (symmetric with SyncExecutor per AC #6).
+            // afterEach fires INSIDE the try block so a throwing afterEach
+            // is caught by the standard failure path (symmetric with
+            // SyncExecutor).
             StepInvoker::fireHooks(
                 $this->manifest->afterEachHooks,
                 StepDefinition::fromJobClass($stepClass),
@@ -238,8 +239,16 @@ final class PipelineStepJob implements ShouldQueue
             $this->manifest->failedStepClass = $stepClass;
             $this->manifest->failedStepIndex = $outerIndex;
 
-            // Story 6.1 AC #3/#7/#8/#9: onStepFailed fires BEFORE FailStrategy
-            // branching. A throwing onStepFailed propagates and bypasses the
+            // PipelineStepFailed fires BEFORE onStepFailed per-step hooks
+            // (queued-mode symmetry with SyncExecutor).
+            // $stepClass is always a flat class-string here: the array-shape
+            // branches return earlier in handle(), so this catch only runs
+            // for a flat step. For nested inner steps the outer index uses
+            // cursor[0] stored in $outerIndex per resolveCurrentStepClass().
+            PipelineEventDispatcher::fireStepFailed($this->manifest, $outerIndex, $stepClass, $cause);
+
+            // onStepFailed fires BEFORE FailStrategy branching.
+            // A throwing onStepFailed propagates and bypasses the
             // FailStrategy branching for THIS failure (no compensation dispatch,
             // no SkipAndContinue advance; Laravel marks the wrapper failed with
             // the hook exception instead of the original step exception).
@@ -275,6 +284,15 @@ final class PipelineStepJob implements ShouldQueue
                         'exception' => $dispatchException->getMessage(),
                     ]);
 
+                    // Release the concurrency slot when the
+                    // SkipAndContinue advance-dispatch fails (no next wrapper
+                    // ran to release it, and the success tail was never
+                    // reached). Reads from the manifest so a concurrent
+                    // success-tail release via advanceAndContinueOrTerminate
+                    // (which nulls the field after releasing) is a no-op.
+                    PipelineConcurrencyGate::release($this->manifest->concurrencyKey);
+                    $this->manifest->concurrencyKey = null;
+
                     throw $dispatchException;
                 }
 
@@ -282,9 +300,9 @@ final class PipelineStepJob implements ShouldQueue
             }
 
             if ($this->manifest->failStrategy === FailStrategy::StopAndCompensate) {
-                // Belt-and-suspenders (Story 8.2 Task 7.7): clear the nested
-                // cursor before compensation dispatch so the chained
-                // CompensationStepJob payloads do not carry stale cursor
+                // Belt-and-suspenders: clear the nested cursor before
+                // compensation dispatch so the chained CompensationStepJob
+                // payloads do not carry stale cursor
                 // state into failed_jobs records.
                 $this->manifest->nestedCursor = [];
                 QueuedCompensationDispatcher::dispatchChain($this->manifest);
@@ -297,42 +315,66 @@ final class PipelineStepJob implements ShouldQueue
                 'exception' => $cause->getMessage(),
             ]);
 
-            // Story 6.2 AC #2, #7, #11: pipeline-level onFailure fires AFTER
-            // per-step onStepFailed (Story 6.1 fireHooks above), AFTER
-            // compensation dispatch (queued — the Bus::chain is dispatched;
-            // compensation jobs run on their own workers later), AFTER the
-            // standard Log::error emission, and BEFORE the wrapper rethrow.
-            // Under SkipAndContinue this branch is unreachable (AC #10).
+            // Pipeline-level onFailure/onComplete callbacks and
+            // PipelineCompleted event fire AFTER per-step onStepFailed,
+            // AFTER compensation dispatch, AFTER
+            // the Log::error emission, and BEFORE the wrapper rethrow. The
+            // concurrency-slot release sits in a finally so a throwing
+            // callback (wrapped as StepExecutionFailed::forCallbackFailure)
+            // still releases the slot before the rethrow propagates.
             try {
-                StepInvoker::firePipelineCallback(
-                    $this->manifest->onFailureCallback,
-                    $this->manifest->context,
-                    $cause,
-                );
-            } catch (Throwable $callbackException) {
-                throw StepExecutionFailed::forCallbackFailure(
-                    $this->manifest->pipelineId,
-                    $outerIndex,
-                    $stepClass,
-                    $callbackException,
-                    $cause,
-                );
-            }
+                try {
+                    StepInvoker::firePipelineCallback(
+                        $this->manifest->onFailureCallback,
+                        $this->manifest->context,
+                        $cause,
+                    );
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $this->manifest->pipelineId,
+                        $outerIndex,
+                        $stepClass,
+                        $callbackException,
+                        $cause,
+                    );
+                }
 
-            try {
-                StepInvoker::firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
-            } catch (Throwable $callbackException) {
-                throw StepExecutionFailed::forCallbackFailure(
-                    $this->manifest->pipelineId,
-                    $outerIndex,
-                    $stepClass,
-                    $callbackException,
-                    $cause,
-                );
+                try {
+                    StepInvoker::firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $this->manifest->pipelineId,
+                        $outerIndex,
+                        $stepClass,
+                        $callbackException,
+                        $cause,
+                    );
+                }
+
+                // PipelineCompleted fires at the terminal failure exit
+                // of a queued wrapper under StopImmediately /
+                // StopAndCompensate, AFTER onFailure + onComplete callbacks
+                // and BEFORE the rethrow that marks the wrapper failed.
+                PipelineEventDispatcher::fireCompleted($this->manifest);
+            } finally {
+                // Release the concurrency slot at the terminal failure tail.
+                // The finally guarantees release even when a lifecycle
+                // callback throws (wrapped as
+                // StepExecutionFailed::forCallbackFailure above) or when
+                // fireCompleted itself throws. No-op when maxConcurrent()
+                // was not configured on the pipeline.
+                PipelineConcurrencyGate::release($this->manifest->concurrencyKey);
+                $this->manifest->concurrencyKey = null;
             }
 
             throw $cause;
         }
+
+        // PipelineStepCompleted fires after afterEach hooks return
+        // and BEFORE advanceAndContinueOrTerminate hops to the next
+        // wrapper. $outerIndex matches the cursor-aware user-visible outer
+        // position for nested/parallel/branch shapes.
+        PipelineEventDispatcher::fireStepCompleted($this->manifest, $outerIndex, $stepClass);
 
         $this->advanceAndContinueOrTerminate($stepClass);
     }
@@ -476,8 +518,26 @@ final class PipelineStepJob implements ShouldQueue
             return;
         }
 
-        StepInvoker::firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
-        StepInvoker::firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+        try {
+            StepInvoker::firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
+            StepInvoker::firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+
+            // PipelineCompleted fires once at the terminal queued exit
+            // AFTER onSuccess + onComplete callbacks on the success tail
+            // (and on the SkipAndContinue success tail, which
+            // reaches here through the skip-recovered continuation path).
+            PipelineEventDispatcher::fireCompleted($this->manifest);
+        } finally {
+            // Release the concurrency slot at the terminal success tail.
+            // The finally guarantees release even when a lifecycle
+            // callback or PipelineCompleted listener throws. The
+            // manifest field is nulled after release so an outer catch
+            // (e.g., SkipAndContinue advance recovery) does not double-release
+            // when the throw propagates back up. No-op when maxConcurrent()
+            // was not configured on the pipeline.
+            PipelineConcurrencyGate::release($this->manifest->concurrencyKey);
+            $this->manifest->concurrencyKey = null;
+        }
     }
 
     /**

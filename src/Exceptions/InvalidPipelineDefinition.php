@@ -38,17 +38,17 @@ class InvalidPipelineDefinition extends PipelineException
     /**
      * Create an exception for a parallel step group containing a nested parallel group.
      *
-     * Nesting is explicitly out of scope for Epic 8 Story 8.1 (sub-pipeline
-     * nesting lives in Story 8.2). The targeted message names the invariant
-     * and points users at the supported entry types so the build-time error
-     * is actionable.
+     * Nesting of ParallelStepGroup entries is explicitly out of scope.
+     * For sub-pipeline nesting, use JobPipeline::nest(...) instead.
+     * The targeted message names the invariant and points users at the
+     * supported entry types so the build-time error is actionable.
      *
      * @return self
      */
     public static function nestedParallelGroup(): self
     {
         return new self(
-            'Nested parallel step groups are not supported (Epic 8 Story 8.2 covers sub-pipeline nesting). '
+            'Nested parallel step groups are not supported. For sub-pipeline nesting use JobPipeline::nest(...). '
             .'A ParallelStepGroup may only contain class-strings or StepDefinition instances.',
         );
     }
@@ -56,8 +56,8 @@ class InvalidPipelineDefinition extends PipelineException
     /**
      * Create an exception for a parallel step group containing a nested pipeline.
      *
-     * Story 8.2 adds NestedPipeline as a third slot type within a pipeline's
-     * outer $steps array, but embedding a nested pipeline inside a parallel
+     * NestedPipeline is supported as a slot type within a pipeline's outer
+     * $steps array, but embedding a nested pipeline inside a parallel
      * group is explicitly rejected. Rationale: ParallelStepGroup deep-clones
      * the manifest per sub-step so sub-steps can run concurrently, which
      * conflicts with the shared-completedSteps semantic that nested-pipeline
@@ -186,6 +186,48 @@ class InvalidPipelineDefinition extends PipelineException
         return new self(
             'Conditional branch selector returned unknown branch key "'.$key.'". '
             .'Registered branches: '.$formattedKnown.'.',
+        );
+    }
+
+    /**
+     * Create an exception for a rateLimit/maxConcurrent key resolver Closure
+     * that returned a non-string or empty/whitespace string at admission time.
+     *
+     * Used by RateLimitPolicy::resolveKey() and ConcurrencyPolicy::resolveKey()
+     * to surface a misbehaving user-supplied closure with an actionable message
+     * naming which setter's resolver failed and what type was returned.
+     *
+     * @param string $context Either "rateLimit" or "maxConcurrent" naming the offending setter.
+     * @param mixed $returned The value the closure returned (used for type reporting via get_debug_type()).
+     *
+     * @return self
+     */
+    public static function keyResolverReturnedInvalidValue(string $context, mixed $returned): self
+    {
+        return new self(
+            $context.' key closure must return a non-empty string, got '.get_debug_type($returned).'.',
+        );
+    }
+
+    /**
+     * Create an exception for a step class that defines neither `handle()` nor `__invoke()`.
+     *
+     * Thrown by StepInvocationDispatcher::detect() at call time (after
+     * `app()->make()` has resolved the step instance) when the resolved
+     * class implements none of the three accepted shapes:
+     * default `handle()`, middleware `handle($passable, Closure $next)`,
+     * or invokable Action `__invoke()`. Validation is deliberately lazy
+     * so the existing `StepDefinition::fromJobClass()` accepts-any-string
+     * contract is preserved.
+     *
+     * @param string $class The fully qualified class name of the offending step.
+     *
+     * @return self
+     */
+    public static function stepClassMissingInvocationMethod(string $class): self
+    {
+        return new self(
+            'Pipeline step class "'.$class.'" must define handle() (single-arg or middleware-shape handle($passable, Closure $next)) or __invoke().',
         );
     }
 }

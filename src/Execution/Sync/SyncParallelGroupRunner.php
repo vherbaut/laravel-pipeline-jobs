@@ -11,6 +11,7 @@ use Throwable;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
@@ -140,7 +141,7 @@ final class SyncParallelGroupRunner
                     $manifest->context,
                 );
 
-                StepInvoker::invokeWithRetry($job, $subConfigs[$subIndex] ?? $defaultConfig);
+                StepInvoker::invokeWithRetry($job, $subConfigs[$subIndex] ?? $defaultConfig, $manifest->context);
 
                 StepInvoker::fireHooks(
                     $manifest->afterEachHooks,
@@ -149,6 +150,12 @@ final class SyncParallelGroupRunner
                 );
 
                 $manifest->markStepCompleted($subStepClass);
+
+                // Each parallel sub-step fires PipelineStepCompleted
+                // with $stepIndex = the outer group index so listeners
+                // correlate step indices against the user-visible outer
+                // position; $stepClass carries the specific sub-step class.
+                PipelineEventDispatcher::fireStepCompleted($manifest, $groupIndex, $subStepClass);
 
                 // Under SkipAndContinue, a sub-step success clears any failure
                 // recorded by an earlier sub-step in the same group (AC #9).
@@ -159,6 +166,11 @@ final class SyncParallelGroupRunner
                 $manifest->failureException = $subException;
                 $manifest->failedStepClass = $subStepClass;
                 $manifest->failedStepIndex = $groupIndex;
+
+                // Failing parallel sub-step fires PipelineStepFailed before
+                // hooks fire, matching the top-level flat-step ordering;
+                // $stepIndex is the outer group index.
+                PipelineEventDispatcher::fireStepFailed($manifest, $groupIndex, $subStepClass, $subException);
 
                 try {
                     StepInvoker::fireHooks(
@@ -236,6 +248,14 @@ final class SyncParallelGroupRunner
                         $subException,
                     );
                 }
+
+                // PipelineCompleted fires once at the terminal failure exit
+                // when a parallel sub-step aborts the pipeline under
+                // StopImmediately / StopAndCompensate. Placed AFTER
+                // onFailure + onComplete callbacks and BEFORE the
+                // StepExecutionFailed rethrow to preserve the "event after
+                // callback" ordering.
+                PipelineEventDispatcher::fireCompleted($manifest);
 
                 throw StepExecutionFailed::forStep(
                     $manifest->pipelineId,
