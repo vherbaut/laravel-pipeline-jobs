@@ -839,8 +839,12 @@ it('Pipeline::fake()->recording()->reverse() with dispatchEvents() fires Pipelin
 // FakePipelineBuilder rateLimit() / maxConcurrent() passthroughs
 
 it('Pipeline::fake() rateLimit() is inert in default fake mode (no Cache or RateLimiter calls)', function (): void {
-    Cache::spy();
+    // RateLimiter must be spied BEFORE Cache: spying resolves the real
+    // singleton (CacheServiceProvider builds it from $app->make('cache')),
+    // and once Cache is swapped with a Mockery spy, that call returns null
+    // and the RateLimiter constructor blows up with a TypeError.
     RateLimiter::spy();
+    Cache::spy();
     Pipeline::fake();
 
     Pipeline::make([FakeJobA::class])->rateLimit('k', 1, 60)->run();
