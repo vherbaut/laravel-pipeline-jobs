@@ -23,6 +23,7 @@ use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\Queued\QueuedCompensationDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Queued\QueuedConditionalBranchHandler;
 use Vherbaut\LaravelPipelineJobs\Execution\Queued\QueuedParallelBatchCoordinator;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineConcurrencyGate;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineEventDispatcher;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepConditionEvaluator;
 use Vherbaut\LaravelPipelineJobs\Execution\Shared\StepInvoker;
@@ -284,6 +285,15 @@ final class PipelineStepJob implements ShouldQueue
                         'exception' => $dispatchException->getMessage(),
                     ]);
 
+                    // Story 9.3 AC #13: release the concurrency slot when the
+                    // SkipAndContinue advance-dispatch fails (no next wrapper
+                    // ran to release it, and the success tail was never
+                    // reached). Reads from the manifest so a concurrent
+                    // success-tail release via advanceAndContinueOrTerminate
+                    // (which nulls the field after releasing) is a no-op.
+                    PipelineConcurrencyGate::release($this->manifest->concurrencyKey);
+                    $this->manifest->concurrencyKey = null;
+
                     throw $dispatchException;
                 }
 
@@ -306,45 +316,57 @@ final class PipelineStepJob implements ShouldQueue
                 'exception' => $cause->getMessage(),
             ]);
 
-            // Story 6.2 AC #2, #7, #11: pipeline-level onFailure fires AFTER
-            // per-step onStepFailed (Story 6.1 fireHooks above), AFTER
-            // compensation dispatch (queued — the Bus::chain is dispatched;
-            // compensation jobs run on their own workers later), AFTER the
-            // standard Log::error emission, and BEFORE the wrapper rethrow.
-            // Under SkipAndContinue this branch is unreachable (AC #10).
+            // Story 6.2 AC #2, #7, #11 + Story 9.3 AC #13: pipeline-level
+            // onFailure/onComplete callbacks and PipelineCompleted event fire
+            // AFTER per-step onStepFailed, AFTER compensation dispatch, AFTER
+            // the Log::error emission, and BEFORE the wrapper rethrow. The
+            // concurrency-slot release sits in a finally so a throwing
+            // callback (wrapped as StepExecutionFailed::forCallbackFailure)
+            // still releases the slot before the rethrow propagates.
             try {
-                StepInvoker::firePipelineCallback(
-                    $this->manifest->onFailureCallback,
-                    $this->manifest->context,
-                    $cause,
-                );
-            } catch (Throwable $callbackException) {
-                throw StepExecutionFailed::forCallbackFailure(
-                    $this->manifest->pipelineId,
-                    $outerIndex,
-                    $stepClass,
-                    $callbackException,
-                    $cause,
-                );
-            }
+                try {
+                    StepInvoker::firePipelineCallback(
+                        $this->manifest->onFailureCallback,
+                        $this->manifest->context,
+                        $cause,
+                    );
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $this->manifest->pipelineId,
+                        $outerIndex,
+                        $stepClass,
+                        $callbackException,
+                        $cause,
+                    );
+                }
 
-            try {
-                StepInvoker::firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
-            } catch (Throwable $callbackException) {
-                throw StepExecutionFailed::forCallbackFailure(
-                    $this->manifest->pipelineId,
-                    $outerIndex,
-                    $stepClass,
-                    $callbackException,
-                    $cause,
-                );
-            }
+                try {
+                    StepInvoker::firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+                } catch (Throwable $callbackException) {
+                    throw StepExecutionFailed::forCallbackFailure(
+                        $this->manifest->pipelineId,
+                        $outerIndex,
+                        $stepClass,
+                        $callbackException,
+                        $cause,
+                    );
+                }
 
-            // Story 9.1 AC #9: PipelineCompleted fires at the terminal failure
-            // exit of a queued wrapper under StopImmediately / StopAndCompensate,
-            // AFTER onFailure + onComplete callbacks and BEFORE the rethrow
-            // that marks the wrapper failed in Laravel's queue.
-            PipelineEventDispatcher::fireCompleted($this->manifest);
+                // Story 9.1 AC #9: PipelineCompleted fires at the terminal
+                // failure exit of a queued wrapper under StopImmediately /
+                // StopAndCompensate, AFTER onFailure + onComplete callbacks
+                // and BEFORE the rethrow that marks the wrapper failed.
+                PipelineEventDispatcher::fireCompleted($this->manifest);
+            } finally {
+                // Story 9.3 AC #13: release the concurrency slot at the
+                // terminal failure tail. The finally guarantees release even
+                // when a lifecycle callback throws (wrapped as
+                // StepExecutionFailed::forCallbackFailure above) or when
+                // fireCompleted itself throws. No-op when maxConcurrent()
+                // was not configured on the pipeline.
+                PipelineConcurrencyGate::release($this->manifest->concurrencyKey);
+                $this->manifest->concurrencyKey = null;
+            }
 
             throw $cause;
         }
@@ -497,14 +519,26 @@ final class PipelineStepJob implements ShouldQueue
             return;
         }
 
-        StepInvoker::firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
-        StepInvoker::firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
+        try {
+            StepInvoker::firePipelineCallback($this->manifest->onSuccessCallback, $this->manifest->context);
+            StepInvoker::firePipelineCallback($this->manifest->onCompleteCallback, $this->manifest->context);
 
-        // Story 9.1 AC #9: PipelineCompleted fires once at the terminal
-        // queued exit AFTER onSuccess + onComplete callbacks on the success
-        // tail (and on the SkipAndContinue success tail, which reaches here
-        // through the skip-recovered continuation path).
-        PipelineEventDispatcher::fireCompleted($this->manifest);
+            // Story 9.1 AC #9: PipelineCompleted fires once at the terminal
+            // queued exit AFTER onSuccess + onComplete callbacks on the
+            // success tail (and on the SkipAndContinue success tail, which
+            // reaches here through the skip-recovered continuation path).
+            PipelineEventDispatcher::fireCompleted($this->manifest);
+        } finally {
+            // Story 9.3 AC #13: release the concurrency slot at the terminal
+            // success tail. The finally guarantees release even when a
+            // lifecycle callback or PipelineCompleted listener throws. The
+            // manifest field is nulled after release so an outer catch
+            // (e.g., SkipAndContinue advance recovery) does not double-release
+            // when the throw propagates back up. No-op when maxConcurrent()
+            // was not configured on the pipeline.
+            PipelineConcurrencyGate::release($this->manifest->concurrencyKey);
+            $this->manifest->concurrencyKey = null;
+        }
     }
 
     /**

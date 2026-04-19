@@ -36,6 +36,8 @@ final class PipelineDefinition
      * @param int|null $defaultBackoff Pipeline-level default backoff delay (seconds) inherited by steps without an explicit backoff() override.
      * @param int|null $defaultTimeout Pipeline-level default timeout (seconds) inherited by steps without an explicit timeout() override.
      * @param bool $dispatchEvents Opt-in flag driving PipelineStepCompleted / PipelineStepFailed / PipelineCompleted dispatch during execution. Defaults to false so pipelines pay zero event-dispatch overhead unless the user explicitly calls PipelineBuilder::dispatchEvents().
+     * @param RateLimitPolicy|null $rateLimitPolicy Optional pipeline-level rate-limit policy evaluated by PipelineRateLimiter::gate() at admission time. Defaults to null so unconfigured pipelines pay zero overhead.
+     * @param ConcurrencyPolicy|null $concurrencyPolicy Optional pipeline-level concurrency-limit policy evaluated by PipelineConcurrencyGate::acquire() at admission time. Defaults to null so unconfigured pipelines pay zero overhead.
      *
      * @throws InvalidPipelineDefinition When the steps array is empty.
      */
@@ -57,6 +59,8 @@ final class PipelineDefinition
         public readonly ?int $defaultBackoff = null,
         public readonly ?int $defaultTimeout = null,
         public readonly bool $dispatchEvents = false,
+        public readonly ?RateLimitPolicy $rateLimitPolicy = null,
+        public readonly ?ConcurrencyPolicy $concurrencyPolicy = null,
     ) {
         if ($this->steps === []) {
             throw InvalidPipelineDefinition::emptySteps();

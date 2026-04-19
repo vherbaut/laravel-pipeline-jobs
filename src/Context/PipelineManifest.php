@@ -114,6 +114,22 @@ final class PipelineManifest
     public array $nestedCursor = [];
 
     /**
+     * Resolved cache key for the concurrency-gate slot acquired at admission, or null when not configured.
+     *
+     * Carries the resolved concurrency-gate cache key for this run so the
+     * terminal executor (sync success/failure, queued terminal wrapper) can
+     * release the slot via PipelineConcurrencyGate::release(). Null when
+     * maxConcurrent() was not configured on the pipeline. Survives the
+     * serialization boundary so queued wrappers can release the slot at
+     * terminal exit; legacy payloads default to null on unserialize via the
+     * defensive ?? pattern, mirroring the dispatchEvents / nestedCursor
+     * migration.
+     *
+     * @var string|null
+     */
+    public ?string $concurrencyKey = null;
+
+    /**
      * Pipeline-level onSuccess callback (wrapped in SerializableClosure for queue transport).
      *
      * Populated by PipelineBuilder::run() / PipelineBuilder::toListener() /
@@ -277,6 +293,25 @@ final class PipelineManifest
     }
 
     /**
+     * Stash (or clear) the resolved concurrency-gate cache key for this run.
+     *
+     * Called by PipelineBuilder::run() / PipelineBuilder::toListener() /
+     * FakePipelineBuilder::executeWithRecording() AFTER PipelineManifest::create()
+     * and BEFORE the executor dispatch so the terminal executor (sync: the
+     * builder's finally block; queued: PipelineStepJob's terminal wrappers)
+     * can release the slot via PipelineConcurrencyGate::release(). Accepts
+     * null to clear (used in tests / recording mode).
+     *
+     * @param string|null $key The namespaced cache key returned by PipelineConcurrencyGate::acquire(), or null when no policy is configured.
+     *
+     * @return void
+     */
+    public function setConcurrencyKey(?string $key): void
+    {
+        $this->concurrencyKey = $key;
+    }
+
+    /**
      * Produce the serialized payload for queue transport.
      *
      * Excludes $failureException by design: Throwable traces hold resources
@@ -315,6 +350,7 @@ final class PipelineManifest
             'onCompleteCallback' => $this->onCompleteCallback,
             'nestedCursor' => $this->nestedCursor,
             'dispatchEvents' => $this->dispatchEvents,
+            'concurrencyKey' => $this->concurrencyKey,
         ];
     }
 
@@ -353,6 +389,7 @@ final class PipelineManifest
         $this->onCompleteCallback = $data['onCompleteCallback'] ?? null;
         $this->nestedCursor = $data['nestedCursor'] ?? [];
         $this->dispatchEvents = $data['dispatchEvents'] ?? false;
+        $this->concurrencyKey = $data['concurrencyKey'] ?? null;
     }
 
     /**

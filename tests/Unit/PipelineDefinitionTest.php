@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
+use Vherbaut\LaravelPipelineJobs\ConcurrencyPolicy;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\RateLimitPolicy;
 use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Jobs\CompensateJobB;
@@ -414,4 +416,27 @@ it('retains the dispatchEvents flag when explicitly enabled via constructor', fu
     );
 
     expect($definition->dispatchEvents)->toBeTrue();
+});
+
+it('defaults rateLimitPolicy and concurrencyPolicy to null when constructor arguments omitted', function (): void {
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass(FakeJobA::class)],
+    );
+
+    expect($definition->rateLimitPolicy)->toBeNull()
+        ->and($definition->concurrencyPolicy)->toBeNull();
+});
+
+it('retains policies when passed at construction', function (): void {
+    $rate = new RateLimitPolicy('k', 5, 60);
+    $conc = new ConcurrencyPolicy('k', 3);
+
+    $definition = new PipelineDefinition(
+        steps: [StepDefinition::fromJobClass(FakeJobA::class)],
+        rateLimitPolicy: $rate,
+        concurrencyPolicy: $conc,
+    );
+
+    expect($definition->rateLimitPolicy)->toBe($rate)
+        ->and($definition->concurrencyPolicy)->toBe($conc);
 });

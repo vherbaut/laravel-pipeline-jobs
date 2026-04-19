@@ -188,4 +188,24 @@ class InvalidPipelineDefinition extends PipelineException
             .'Registered branches: '.$formattedKnown.'.',
         );
     }
+
+    /**
+     * Create an exception for a rateLimit/maxConcurrent key resolver Closure
+     * that returned a non-string or empty/whitespace string at admission time.
+     *
+     * Used by RateLimitPolicy::resolveKey() and ConcurrencyPolicy::resolveKey()
+     * to surface a misbehaving user-supplied closure with an actionable message
+     * naming which setter's resolver failed and what type was returned.
+     *
+     * @param string $context Either "rateLimit" or "maxConcurrent" naming the offending setter.
+     * @param mixed $returned The value the closure returned (used for type reporting via get_debug_type()).
+     *
+     * @return self
+     */
+    public static function keyResolverReturnedInvalidValue(string $context, mixed $returned): self
+    {
+        return new self(
+            $context.' key closure must return a non-empty string, got '.get_debug_type($returned).'.',
+        );
+    }
 }

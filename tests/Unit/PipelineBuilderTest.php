@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Laravel\SerializableClosure\SerializableClosure;
+use Vherbaut\LaravelPipelineJobs\ConcurrencyPolicy;
 use Vherbaut\LaravelPipelineJobs\ConditionalBranch;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
@@ -12,6 +13,7 @@ use Vherbaut\LaravelPipelineJobs\NestedPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
 use Vherbaut\LaravelPipelineJobs\PipelineBuilder;
 use Vherbaut\LaravelPipelineJobs\PipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\RateLimitPolicy;
 use Vherbaut\LaravelPipelineJobs\Step;
 use Vherbaut\LaravelPipelineJobs\StepDefinition;
 use Vherbaut\LaravelPipelineJobs\Tests\Fixtures\Contexts\SimpleContext;
@@ -1630,4 +1632,145 @@ it('reverse() on a single-step receiver yields a single-step reversed builder wi
     expect($reversed)->not->toBe($original)
         ->and($reversed->build()->steps)->toHaveCount(1)
         ->and($reversed->build()->steps[0]->jobClass)->toBe(FakeJobA::class);
+});
+
+// Story 9.3 — PipelineBuilder::rateLimit() / maxConcurrent() setters and policy propagation
+
+it('rateLimit() with non-empty string key + valid max + valid perSeconds builds a policy on the definition', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->rateLimit('tenant:42', 100, 60)
+        ->build();
+
+    expect($definition->rateLimitPolicy)->toBeInstanceOf(RateLimitPolicy::class)
+        ->and($definition->rateLimitPolicy->key)->toBe('tenant:42')
+        ->and($definition->rateLimitPolicy->max)->toBe(100)
+        ->and($definition->rateLimitPolicy->perSeconds)->toBe(60);
+});
+
+it('rateLimit() with Closure key stores the closure verbatim on the policy', function (): void {
+    $resolver = static fn (?PipelineContext $ctx): string => 'resolved-key';
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->rateLimit($resolver, 5, 30)
+        ->build();
+
+    expect($definition->rateLimitPolicy)->toBeInstanceOf(RateLimitPolicy::class)
+        ->and($definition->rateLimitPolicy->key)->toBe($resolver);
+});
+
+it('rateLimit() rejects an empty string key', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->rateLimit('', 1, 1))
+        ->toThrow(InvalidPipelineDefinition::class, 'rateLimit key must be a non-empty string or Closure, got empty string.');
+});
+
+it('rateLimit() rejects a whitespace-only key', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->rateLimit("   \t", 1, 1))
+        ->toThrow(InvalidPipelineDefinition::class);
+});
+
+it('rateLimit() rejects max < 1', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->rateLimit('k', 0, 60))
+        ->toThrow(InvalidPipelineDefinition::class, 'rateLimit max must be a positive integer (>= 1), got 0.');
+});
+
+it('rateLimit() rejects perSeconds < 1', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->rateLimit('k', 5, 0))
+        ->toThrow(InvalidPipelineDefinition::class, 'rateLimit perSeconds must be a positive integer (>= 1), got 0.');
+});
+
+it('rateLimit() is last-write-wins when called multiple times', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->rateLimit('a', 1, 1)
+        ->rateLimit('b', 2, 2)
+        ->build();
+
+    expect($definition->rateLimitPolicy?->key)->toBe('b')
+        ->and($definition->rateLimitPolicy?->max)->toBe(2)
+        ->and($definition->rateLimitPolicy?->perSeconds)->toBe(2);
+});
+
+it('rateLimit() returns the same builder instance for fluent chaining', function (): void {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    expect($builder->rateLimit('k', 1, 1))->toBe($builder);
+});
+
+it('maxConcurrent() with non-empty string key + valid limit builds a policy on the definition', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->maxConcurrent('tenant:42', 5)
+        ->build();
+
+    expect($definition->concurrencyPolicy)->toBeInstanceOf(ConcurrencyPolicy::class)
+        ->and($definition->concurrencyPolicy->key)->toBe('tenant:42')
+        ->and($definition->concurrencyPolicy->limit)->toBe(5);
+});
+
+it('maxConcurrent() with Closure key stores the closure verbatim on the policy', function (): void {
+    $resolver = static fn (?PipelineContext $ctx): string => 'resolved-key';
+
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->maxConcurrent($resolver, 3)
+        ->build();
+
+    expect($definition->concurrencyPolicy)->toBeInstanceOf(ConcurrencyPolicy::class)
+        ->and($definition->concurrencyPolicy->key)->toBe($resolver);
+});
+
+it('maxConcurrent() rejects an empty string key', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->maxConcurrent('', 1))
+        ->toThrow(InvalidPipelineDefinition::class, 'maxConcurrent key must be a non-empty string or Closure, got empty string.');
+});
+
+it('maxConcurrent() rejects limit < 1', function (): void {
+    expect(fn () => (new PipelineBuilder([FakeJobA::class]))->maxConcurrent('k', 0))
+        ->toThrow(InvalidPipelineDefinition::class, 'maxConcurrent limit must be a positive integer (>= 1), got 0.');
+});
+
+it('maxConcurrent() is last-write-wins when called multiple times', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->maxConcurrent('a', 1)
+        ->maxConcurrent('b', 7)
+        ->build();
+
+    expect($definition->concurrencyPolicy?->key)->toBe('b')
+        ->and($definition->concurrencyPolicy?->limit)->toBe(7);
+});
+
+it('maxConcurrent() returns the same builder instance for fluent chaining', function (): void {
+    $builder = new PipelineBuilder([FakeJobA::class]);
+
+    expect($builder->maxConcurrent('k', 1))->toBe($builder);
+});
+
+it('build() leaves both policies null when neither setter was called (zero-overhead default)', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))->build();
+
+    expect($definition->rateLimitPolicy)->toBeNull()
+        ->and($definition->concurrencyPolicy)->toBeNull();
+});
+
+it('reverse() preserves both policies on the cloned builder', function (): void {
+    $original = (new PipelineBuilder([FakeJobA::class, FakeJobB::class]))
+        ->rateLimit('k', 10, 30)
+        ->maxConcurrent('k', 3);
+
+    $reversedDefinition = $original->reverse()->build();
+
+    expect($reversedDefinition->rateLimitPolicy?->key)->toBe('k')
+        ->and($reversedDefinition->rateLimitPolicy?->max)->toBe(10)
+        ->and($reversedDefinition->rateLimitPolicy?->perSeconds)->toBe(30)
+        ->and($reversedDefinition->concurrencyPolicy?->key)->toBe('k')
+        ->and($reversedDefinition->concurrencyPolicy?->limit)->toBe(3);
+});
+
+it('rateLimit() and maxConcurrent() compose on the same builder', function (): void {
+    $definition = (new PipelineBuilder([FakeJobA::class]))
+        ->rateLimit('tenant:42', 100, 60)
+        ->maxConcurrent('tenant:42', 5)
+        ->build();
+
+    expect($definition->rateLimitPolicy)->not->toBeNull()
+        ->and($definition->concurrencyPolicy)->not->toBeNull()
+        ->and($definition->rateLimitPolicy?->key)->toBe('tenant:42')
+        ->and($definition->concurrencyPolicy?->key)->toBe('tenant:42');
 });

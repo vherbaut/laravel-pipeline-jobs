@@ -6,13 +6,18 @@ namespace Vherbaut\LaravelPipelineJobs;
 
 use Closure;
 use Laravel\SerializableClosure\SerializableClosure;
+use Throwable;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineManifest;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Exceptions\ContextSerializationFailed;
 use Vherbaut\LaravelPipelineJobs\Exceptions\InvalidPipelineDefinition;
+use Vherbaut\LaravelPipelineJobs\Exceptions\PipelineConcurrencyLimitExceeded;
+use Vherbaut\LaravelPipelineJobs\Exceptions\PipelineThrottled;
 use Vherbaut\LaravelPipelineJobs\Exceptions\StepExecutionFailed;
 use Vherbaut\LaravelPipelineJobs\Execution\QueuedExecutor;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineConcurrencyGate;
+use Vherbaut\LaravelPipelineJobs\Execution\Shared\PipelineRateLimiter;
 use Vherbaut\LaravelPipelineJobs\Execution\SyncExecutor;
 
 /**
@@ -49,6 +54,12 @@ final class PipelineBuilder
     /** @var int|null Pipeline-level default timeout in seconds; steps without explicit timeout() inherit this. */
     private ?int $defaultTimeout = null;
 
+    /** @var RateLimitPolicy|null Pipeline-level rate-limit policy gated at admission time; null when rateLimit() was not called. */
+    private ?RateLimitPolicy $rateLimitPolicy = null;
+
+    /** @var ConcurrencyPolicy|null Pipeline-level concurrency-limit policy gated at admission time; null when maxConcurrent() was not called. */
+    private ?ConcurrencyPolicy $concurrencyPolicy = null;
+
     /** @var array<int, Closure> */
     private array $beforeEachHooks = [];
 
@@ -61,7 +72,7 @@ final class PipelineBuilder
     /** @var (Closure(?PipelineContext): void)|null */
     private ?Closure $onSuccessCallback = null;
 
-    /** @var (Closure(?PipelineContext, \Throwable): void)|null */
+    /** @var (Closure(?PipelineContext, Throwable): void)|null */
     private ?Closure $onFailureCallback = null;
 
     /** @var (Closure(?PipelineContext): void)|null */
@@ -666,6 +677,127 @@ final class PipelineBuilder
     }
 
     /**
+     * Configure a pipeline-level rate-limit policy gated at admission time.
+     *
+     * Registers an immutable RateLimitPolicy on the builder so the next
+     * run() invocation consults Laravel's RateLimiter facade BEFORE any
+     * step executes. When the quota for the resolved key is exhausted,
+     * run() throws PipelineThrottled WITHOUT executing any step, firing
+     * any hook, dispatching any event, or invoking any callback. The
+     * caller decides the response strategy (retry-later, dead-letter,
+     * user-facing 429, etc).
+     *
+     * Zero-overhead contract: when rateLimit() is NOT called, the
+     * executor never resolves the RateLimiter facade. Last-write-wins
+     * when called multiple times. Composes independently with
+     * maxConcurrent(): a pipeline configured with both gates is admitted
+     * only when both pass; the rate-limit gate runs FIRST so a
+     * quota-exhausted attempt does not consume a concurrency slot.
+     *
+     * The key may be a literal non-empty string (constant per pipeline)
+     * or a Closure(?PipelineContext): string evaluated against the
+     * resolved pipeline context exactly once per admission attempt
+     * (per run() and per listener-event-dispatch). Closure throws
+     * propagate to the caller verbatim; closure returns that are not
+     * non-empty strings throw InvalidPipelineDefinition at admission
+     * time.
+     *
+     * Per-step rate limiting is OUT OF SCOPE for this method (admission
+     * control is pipeline-level only).
+     *
+     * @param string|Closure(?PipelineContext): string $keyOrResolver Literal key string OR Closure invoked at admission time with the resolved context returning the key.
+     * @param int $max Maximum admitted run() invocations per window; must be >= 1.
+     * @param int $perSeconds Window length in seconds; must be >= 1.
+     *
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $keyOrResolver is an empty string, $max < 1, or $perSeconds < 1.
+     *
+     * @see PipelineThrottled Thrown by run() / toListener() when the quota is exhausted at admission.
+     */
+    public function rateLimit(string|Closure $keyOrResolver, int $max, int $perSeconds): static
+    {
+        if (is_string($keyOrResolver) && trim($keyOrResolver) === '') {
+            throw new InvalidPipelineDefinition('rateLimit key must be a non-empty string or Closure, got empty string.');
+        }
+
+        if ($max < 1) {
+            throw new InvalidPipelineDefinition('rateLimit max must be a positive integer (>= 1), got '.$max.'.');
+        }
+
+        if ($perSeconds < 1) {
+            throw new InvalidPipelineDefinition('rateLimit perSeconds must be a positive integer (>= 1), got '.$perSeconds.'.');
+        }
+
+        $this->rateLimitPolicy = new RateLimitPolicy($keyOrResolver, $max, $perSeconds);
+
+        return $this;
+    }
+
+    /**
+     * Configure a pipeline-level concurrency-limit policy gated at admission time.
+     *
+     * Registers an immutable ConcurrencyPolicy on the builder so the next
+     * run() invocation atomically increments a Cache-backed counter
+     * BEFORE any step executes. When the resolved key already has $limit
+     * pipelines in flight, run() throws PipelineConcurrencyLimitExceeded
+     * WITHOUT executing any step, firing any hook, dispatching any event,
+     * or invoking any callback. On admission, the slot is released at
+     * terminal exit (sync: in the builder's finally block; queued: in
+     * PipelineStepJob's terminal wrappers; recording: in
+     * FakePipelineBuilder::executeWithRecording's finally block).
+     *
+     * Atomicity caveat: relies on Cache::increment() being atomic across
+     * workers, which holds on Redis, Memcached, and Database stores but
+     * NOT on file or array stores. Production users MUST configure
+     * Redis / Memcached / Database. The internal counter is namespaced
+     * under "pipeline:concurrent:" and protected by a safety TTL of
+     * max(3600, limit * 60) seconds so a crashed worker's never-released
+     * slot is reclaimed eventually.
+     *
+     * Zero-overhead contract: when maxConcurrent() is NOT called, the
+     * executor never resolves the Cache facade. Last-write-wins when
+     * called multiple times. Composes independently with rateLimit(): a
+     * pipeline configured with both gates is admitted only when both
+     * pass; rate-limit runs FIRST so a quota-exhausted attempt does not
+     * consume a concurrency slot.
+     *
+     * The key may be a literal non-empty string (constant per pipeline)
+     * or a Closure(?PipelineContext): string evaluated against the
+     * resolved pipeline context exactly once per admission attempt
+     * (per run() and per listener-event-dispatch). Closure throws
+     * propagate to the caller verbatim; closure returns that are not
+     * non-empty strings throw InvalidPipelineDefinition at admission
+     * time.
+     *
+     * Per-step concurrency limiting is OUT OF SCOPE for this method
+     * (admission control is pipeline-level only).
+     *
+     * @param string|Closure(?PipelineContext): string $keyOrResolver Literal key string OR Closure invoked at admission time with the resolved context returning the key.
+     * @param int $limit Maximum number of pipelines admitted simultaneously on the same resolved key; must be >= 1.
+     *
+     * @return static
+     *
+     * @throws InvalidPipelineDefinition When $keyOrResolver is an empty string or $limit < 1.
+     *
+     * @see PipelineConcurrencyLimitExceeded Thrown by run() / toListener() when the limit is reached at admission.
+     */
+    public function maxConcurrent(string|Closure $keyOrResolver, int $limit): static
+    {
+        if (is_string($keyOrResolver) && trim($keyOrResolver) === '') {
+            throw new InvalidPipelineDefinition('maxConcurrent key must be a non-empty string or Closure, got empty string.');
+        }
+
+        if ($limit < 1) {
+            throw new InvalidPipelineDefinition('maxConcurrent limit must be a positive integer (>= 1), got '.$limit.'.');
+        }
+
+        $this->concurrencyPolicy = new ConcurrencyPolicy($keyOrResolver, $limit);
+
+        return $this;
+    }
+
+    /**
      * Set the context to inject into the pipeline at execution time.
      *
      * Accepts either a PipelineContext instance for immediate use,
@@ -798,7 +930,7 @@ final class PipelineBuilder
      * FailStrategy and once with a Closure registers BOTH independently.
      * Calling twice with the same kind is last-write-wins within that kind.
      *
-     * @param FailStrategy|(Closure(?PipelineContext, \Throwable): void) $strategyOrCallback Either the saga strategy to apply, or a callback invoked once on terminal pipeline failure.
+     * @param FailStrategy|(Closure(?PipelineContext, Throwable): void) $strategyOrCallback Either the saga strategy to apply, or a callback invoked once on terminal pipeline failure.
      * @return static
      */
     public function onFailure(FailStrategy|Closure $strategyOrCallback): static
@@ -977,7 +1109,7 @@ final class PipelineBuilder
      * Subsequent onStepFailed hooks in the array do NOT fire (the loop
      * aborts on first throw).
      *
-     * @param Closure(StepDefinition, ?PipelineContext, \Throwable): void $hook Closure invoked when a step or hook throws.
+     * @param Closure(StepDefinition, ?PipelineContext, Throwable): void $hook Closure invoked when a step or hook throws.
      * @return static
      */
     public function onStepFailed(Closure $hook): static
@@ -1024,8 +1156,10 @@ final class PipelineBuilder
      *   callback (return()), fail strategy and failure callback (onFailure()),
      *   pipeline-level defaults (defaultQueue, defaultConnection,
      *   defaultRetry, defaultBackoff, defaultTimeout), hook arrays
-     *   (beforeEachHooks, afterEachHooks, onStepFailedHooks), and callback
-     *   slots (onSuccessCallback, onFailureCallback, onCompleteCallback).
+     *   (beforeEachHooks, afterEachHooks, onStepFailedHooks), callback
+     *   slots (onSuccessCallback, onFailureCallback, onCompleteCallback),
+     *   rate-limit policy (rateLimit()), and concurrency policy
+     *   (maxConcurrent()).
      *
      * Idempotency and independence:
      * - Period-2 idempotent: reverse()->reverse() yields a distinct NEW builder
@@ -1084,6 +1218,8 @@ final class PipelineBuilder
         $clone->onSuccessCallback = $this->onSuccessCallback;
         $clone->onFailureCallback = $this->onFailureCallback;
         $clone->onCompleteCallback = $this->onCompleteCallback;
+        $clone->rateLimitPolicy = $this->rateLimitPolicy;
+        $clone->concurrencyPolicy = $this->concurrencyPolicy;
 
         return $clone;
     }
@@ -1113,6 +1249,8 @@ final class PipelineBuilder
             defaultBackoff: $this->defaultBackoff,
             defaultTimeout: $this->defaultTimeout,
             dispatchEvents: $this->dispatchEvents,
+            rateLimitPolicy: $this->rateLimitPolicy,
+            concurrencyPolicy: $this->concurrencyPolicy,
         );
     }
 
@@ -1139,42 +1277,75 @@ final class PipelineBuilder
             ? ($this->context)()
             : $this->context;
 
-        $stepClasses = self::buildStepClassesPayload($definition);
+        // Story 9.3 — admission-control gates (rate-limit BEFORE concurrency so
+        // a quota-exhausted attempt does not consume a concurrency slot).
+        PipelineRateLimiter::gate($definition->rateLimitPolicy, $resolvedContext);
+        $concurrencyKey = PipelineConcurrencyGate::acquire($definition->concurrencyPolicy, $resolvedContext);
 
-        $stepConfigs = self::resolveStepConfigs($definition);
+        // Story 9.3 — setup-window guard: release the slot if any of the
+        // post-acquire wiring throws (SerializableClosure wrapping, manifest
+        // construction). The main executor dispatch has its own try/finally
+        // below; this guard covers the narrow window between acquire() and
+        // the dispatch try blocks.
+        try {
+            $stepClasses = self::buildStepClassesPayload($definition);
 
-        $manifest = PipelineManifest::create(
-            stepClasses: $stepClasses,
-            context: $resolvedContext,
-            compensationMapping: $definition->compensationMapping(),
-            stepConditions: $this->buildStepConditions($definition),
-            failStrategy: $definition->failStrategy,
-            stepConfigs: $stepConfigs,
-            dispatchEvents: $definition->dispatchEvents,
-        );
+            $stepConfigs = self::resolveStepConfigs($definition);
 
-        $hookClosures = $this->buildHookSerializableClosures($definition);
-        $manifest->beforeEachHooks = $hookClosures['beforeEach'];
-        $manifest->afterEachHooks = $hookClosures['afterEach'];
-        $manifest->onStepFailedHooks = $hookClosures['onStepFailed'];
+            $manifest = PipelineManifest::create(
+                stepClasses: $stepClasses,
+                context: $resolvedContext,
+                compensationMapping: $definition->compensationMapping(),
+                stepConditions: $this->buildStepConditions($definition),
+                failStrategy: $definition->failStrategy,
+                stepConfigs: $stepConfigs,
+                dispatchEvents: $definition->dispatchEvents,
+            );
+            $manifest->setConcurrencyKey($concurrencyKey);
 
-        $callbackClosures = $this->buildCallbackSerializableClosures($definition);
-        $manifest->onCompleteCallback = $callbackClosures['onComplete'];
-        $manifest->onSuccessCallback = $callbackClosures['onSuccess'];
-        $manifest->onFailureCallback = $callbackClosures['onFailure'];
+            $hookClosures = $this->buildHookSerializableClosures($definition);
+            $manifest->beforeEachHooks = $hookClosures['beforeEach'];
+            $manifest->afterEachHooks = $hookClosures['afterEach'];
+            $manifest->onStepFailedHooks = $hookClosures['onStepFailed'];
+
+            $callbackClosures = $this->buildCallbackSerializableClosures($definition);
+            $manifest->onCompleteCallback = $callbackClosures['onComplete'];
+            $manifest->onSuccessCallback = $callbackClosures['onSuccess'];
+            $manifest->onFailureCallback = $callbackClosures['onFailure'];
+        } catch (Throwable $setupException) {
+            PipelineConcurrencyGate::release($concurrencyKey);
+
+            throw $setupException;
+        }
 
         if ($definition->shouldBeQueued) {
-            // AC #4: queued mode always returns null; return() is sync-only.
-            return (new QueuedExecutor)->execute($definition, $manifest);
+            try {
+                // AC #4: queued mode always returns null; return() is sync-only.
+                return (new QueuedExecutor)->execute($definition, $manifest);
+            } catch (ContextSerializationFailed $dispatchException) {
+                // Dispatch-time validation failure: no wrapper was enqueued, so
+                // release the slot inline (terminal wrappers never run to release
+                // it). Story 9.3 AC #12 / DD #10. Other throws from execute()
+                // under the sync driver originate from inline-executed wrappers
+                // that already released the slot via PipelineStepJob's terminal
+                // tails; do NOT re-release in those cases.
+                PipelineConcurrencyGate::release($concurrencyKey);
+
+                throw $dispatchException;
+            }
         }
 
-        $finalContext = (new SyncExecutor)->execute($definition, $manifest);
+        try {
+            $finalContext = (new SyncExecutor)->execute($definition, $manifest);
 
-        if ($this->returnCallback !== null) {
-            return ($this->returnCallback)($finalContext);
+            if ($this->returnCallback !== null) {
+                return ($this->returnCallback)($finalContext);
+            }
+
+            return $finalContext;
+        } finally {
+            PipelineConcurrencyGate::release($concurrencyKey);
         }
-
-        return $finalContext;
     }
 
     /**
@@ -1222,31 +1393,54 @@ final class PipelineBuilder
                 ? ($contextSource)($event)
                 : $contextSource;
 
-            $manifest = PipelineManifest::create(
-                stepClasses: $stepClasses,
-                context: $resolvedContext,
-                compensationMapping: $definition->compensationMapping(),
-                stepConditions: $stepConditions,
-                failStrategy: $definition->failStrategy,
-                stepConfigs: $stepConfigs,
-                dispatchEvents: $definition->dispatchEvents,
-            );
+            // Story 9.3 — admission-control gates per listener-event-dispatch.
+            PipelineRateLimiter::gate($definition->rateLimitPolicy, $resolvedContext);
+            $concurrencyKey = PipelineConcurrencyGate::acquire($definition->concurrencyPolicy, $resolvedContext);
 
-            $manifest->beforeEachHooks = $hookClosures['beforeEach'];
-            $manifest->afterEachHooks = $hookClosures['afterEach'];
-            $manifest->onStepFailedHooks = $hookClosures['onStepFailed'];
+            // Story 9.3 — setup-window guard (mirrors run()): release the slot
+            // if manifest construction / callback-wiring throws.
+            try {
+                $manifest = PipelineManifest::create(
+                    stepClasses: $stepClasses,
+                    context: $resolvedContext,
+                    compensationMapping: $definition->compensationMapping(),
+                    stepConditions: $stepConditions,
+                    failStrategy: $definition->failStrategy,
+                    stepConfigs: $stepConfigs,
+                    dispatchEvents: $definition->dispatchEvents,
+                );
+                $manifest->setConcurrencyKey($concurrencyKey);
 
-            $manifest->onCompleteCallback = $callbackClosures['onComplete'];
-            $manifest->onSuccessCallback = $callbackClosures['onSuccess'];
-            $manifest->onFailureCallback = $callbackClosures['onFailure'];
+                $manifest->beforeEachHooks = $hookClosures['beforeEach'];
+                $manifest->afterEachHooks = $hookClosures['afterEach'];
+                $manifest->onStepFailedHooks = $hookClosures['onStepFailed'];
+
+                $manifest->onCompleteCallback = $callbackClosures['onComplete'];
+                $manifest->onSuccessCallback = $callbackClosures['onSuccess'];
+                $manifest->onFailureCallback = $callbackClosures['onFailure'];
+            } catch (Throwable $setupException) {
+                PipelineConcurrencyGate::release($concurrencyKey);
+
+                throw $setupException;
+            }
 
             if ($shouldBeQueued) {
-                (new QueuedExecutor)->execute($definition, $manifest);
+                try {
+                    (new QueuedExecutor)->execute($definition, $manifest);
+                } catch (ContextSerializationFailed $dispatchException) {
+                    PipelineConcurrencyGate::release($concurrencyKey);
+
+                    throw $dispatchException;
+                }
 
                 return;
             }
 
-            (new SyncExecutor)->execute($definition, $manifest);
+            try {
+                (new SyncExecutor)->execute($definition, $manifest);
+            } finally {
+                PipelineConcurrencyGate::release($concurrencyKey);
+            }
         };
     }
 

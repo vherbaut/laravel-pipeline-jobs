@@ -2,13 +2,16 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\RateLimiter;
 use PHPUnit\Framework\AssertionFailedError;
 use Vherbaut\LaravelPipelineJobs\Context\PipelineContext;
 use Vherbaut\LaravelPipelineJobs\Enums\FailStrategy;
 use Vherbaut\LaravelPipelineJobs\Events\PipelineCompleted;
 use Vherbaut\LaravelPipelineJobs\Events\PipelineStepCompleted;
 use Vherbaut\LaravelPipelineJobs\Events\PipelineStepFailed;
+use Vherbaut\LaravelPipelineJobs\Exceptions\PipelineThrottled;
 use Vherbaut\LaravelPipelineJobs\Facades\Pipeline;
 use Vherbaut\LaravelPipelineJobs\JobPipeline;
 use Vherbaut\LaravelPipelineJobs\ParallelStepGroup;
@@ -825,4 +828,58 @@ it('Pipeline::fake()->recording()->reverse() with dispatchEvents() fires Pipelin
         TrackExecutionJobB::class,
         TrackExecutionJobA::class,
     ]);
+});
+
+// Story 9.3 — FakePipelineBuilder rateLimit() / maxConcurrent() passthroughs
+
+it('Pipeline::fake() rateLimit() is inert in default fake mode (no Cache or RateLimiter calls)', function (): void {
+    Cache::spy();
+    RateLimiter::spy();
+    Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class])->rateLimit('k', 1, 60)->run();
+
+    RateLimiter::shouldNotHaveReceived('hit');
+    RateLimiter::shouldNotHaveReceived('tooManyAttempts');
+    Cache::shouldNotHaveReceived('increment');
+});
+
+it('Pipeline::fake() maxConcurrent() is inert in default fake mode (no Cache calls)', function (): void {
+    Cache::spy();
+    Pipeline::fake();
+
+    Pipeline::make([FakeJobA::class])->maxConcurrent('k', 1)->run();
+
+    Cache::shouldNotHaveReceived('add');
+    Cache::shouldNotHaveReceived('increment');
+});
+
+it('Pipeline::fake()->recording() rateLimit() ACTIVELY gates via the real RateLimiter', function (): void {
+    Cache::flush();
+    RateLimiter::clear('k');
+    Pipeline::fake()->recording();
+
+    Pipeline::make([FakeJobA::class])->rateLimit('k', 1, 60)->run();
+
+    expect(static fn () => Pipeline::make([FakeJobA::class])->rateLimit('k', 1, 60)->run())
+        ->toThrow(PipelineThrottled::class);
+
+    RateLimiter::clear('k');
+});
+
+it('Pipeline::fake()->recording() maxConcurrent() ACTIVELY gates and releases on success', function (): void {
+    Cache::flush();
+    Pipeline::fake()->recording();
+
+    Pipeline::make([FakeJobA::class])->maxConcurrent('k', 2)->run();
+
+    expect(Cache::get('pipeline:concurrent:k'))->toBe(0);
+});
+
+it('FakePipelineBuilder rateLimit() and maxConcurrent() return $this for chainability', function (): void {
+    $fake = Pipeline::fake();
+    $builder = $fake->make([FakeJobA::class]);
+
+    expect($builder->rateLimit('k', 1, 60))->toBe($builder)
+        ->and($builder->maxConcurrent('k', 1))->toBe($builder);
 });
